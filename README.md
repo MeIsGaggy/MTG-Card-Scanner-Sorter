@@ -38,6 +38,12 @@ A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering card
   sudo apt install -y tesseract-ocr libatlas-base-dev libjpeg-dev zlib1g-dev
   ```
 
+### Download repository
+```bash
+gh repo clone MeIsGaggy/MTG-Card-Scanner-Sorter
+cd MTG-Card-Scanner-Sorter/
+```
+
 ### Create a virtualenv and install
 
 From your project root (the folder containing `pyproject.toml`):
@@ -50,11 +56,9 @@ pip install -e .        # editable install during development
 pip uninstall -y opencv-python && pip install opencv-python-headless
 ```
 
-> If you installed from GitHub or a built wheel, replace the last line with the appropriate `pip install` command.
-
 ---
 
-## 🚀 Quick start
+## 🚀 Quick start (Exports are optional)
 
 ```bash
 export SETTINGS_PATH="./settings.json"          # optional (defaults to ./settings.json)
@@ -63,6 +67,9 @@ mtg-scanner
 ```
 
 Open a browser to `http://<raspberrypi>:5000` (or whatever host/port you configured).
+
+> settings.json can be created within the app by opening the App Settings then clicking on Save
+> Repo does not need to be set. This is for following my updates, or can be changed to follow your own if you fork
 
 ---
 
