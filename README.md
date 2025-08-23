@@ -55,7 +55,17 @@ pip install -e .        # editable install during development
 # If OpenCV wheels complain, use headless:
 pip uninstall -y opencv-python && pip install opencv-python-headless
 ```
+---
 
+## 🔔 Updates
+
+If there is an update available, it will be logged in the apps console. Run the following command to install the update
+
+```bash
+pip install --upgrade --force-reinstall \
+  "git+https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter@[VERSION CODE]#egg=mtg_scanner"
+```
+Where is states [VERSION CODE] you need to paste the vX.X.X from the latest release
 ---
 
 ## 🚀 Quick start (Exports are optional)
