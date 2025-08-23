@@ -245,4 +245,4 @@ sudo systemctl enable --now mtg-scanner
 
 See **LICENSE** in this repository for the license. 
 
-No commercial or for-profit use allowed. Personal projects only.
+No commercial or for-profit use allowed.
