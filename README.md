@@ -219,30 +219,10 @@ sudo systemctl enable --now mtg-scanner
 * **Alternate currencies**: point `FX_URL` to another base/target pair or disable FX conversion in the UI.
 * **Printer / Moonraker hooks**: `MOONRAKER_URL` and `HTTP_POST_URL` exist for optional integrations—leave them as defaults if unused.
 
----
 
-## 🧑‍💻 Development
-
-```bash
-# editable install
-pip install -e .
-
-# lint/format (optional, if you add tooling later)
-# ruff check . && ruff format .
-
-# build wheels for release
-python -m build
-```
-
-**Release flow** (for the GitHub update check):
-
-1. Bump the version (`pyproject.toml` → `project.version`).
-2. Tag: `git tag v0.1.1 && git push origin v0.1.1`.
-3. Create a GitHub Release pointing to that tag (attach wheels if desired).
-4. On next start, the app sees the new tag and reports that an update is available.
-
----
 
 ## 📄 License
 
-See **LICENSE** in this repository for the license text.
+See **LICENSE** in this repository for the license. 
+
+No commercial or for-profit use allowed. Personal projects only.
