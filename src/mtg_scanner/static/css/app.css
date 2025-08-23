@@ -1,0 +1,343 @@
+:root{--gap:12px;--panel-radius:12px;--pad:10px;--border:#2a2d34;--bg:#0f1115;--panel:#151821;--panel-head:#11141b;
+--ok-bg:#0e2e15;--ok-bd:#1c4a29;--ok-fg:#9be5a8;--wr-bg:#2e250e;--wr-bd:#4a3a1c;--wr-fg:#f3d17a;
+--bd-bg:#2e0e0e;--bd-bd:#4a1c1c;--bd-fg:#f4a7a7;--fs:clamp(11px,1.2vw,16px);--h2fs:clamp(12px,1.4vw,18px);--pillfs:clamp(10px,1.0vw,14px);}
+*{box-sizing:border-box} html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:#e4e6eb;font-family:system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:0}
+.grid{display:grid;height:100vh;width:100vw;padding:var(--gap);gap:var(--gap);
+  grid-template-columns:1.6fr 1fr 1fr;grid-template-rows:1fr .9fr;
+  grid-template-areas:"live crop info" "status cmp info"}
+@media (max-width:1200px){.grid{grid-template-columns:1.2fr 1fr;grid-template-rows:1fr .9fr .9fr .9fr;
+  grid-template-areas:"live info" "crop info" "cmp info" "status status"}}
+@media (max-width:780px){.grid{grid-template-columns:1fr;grid-template-rows:.9fr .8fr .8fr .9fr;
+  grid-template-areas:"live" "crop" "cmp" "info"} #status{display:none}}
+.panel{border:1px solid var(--border);border-radius:var(--panel-radius);background:var(--panel);overflow:hidden;display:flex;flex-direction:column;min-width:0;min-height:0}
+.panel h2{margin:0;padding:8px var(--pad);font-size:var(--h2fs);border-bottom:1px solid #262a33;background:var(--panel-head)}
+.panel > .content{flex:1 1 auto; min-height:0; display:flex; flex-direction:column; gap:var(--pad);}
+.main{grid-area:live} .crop{grid-area:crop} .info{grid-area:info} .status-panel{grid-area:status} .cmp{grid-area:cmp}
+.media-wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center}
+.media-wrap img{width:100%;height:100%;object-fit:contain;display:block}
+.row{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center}
+.pill{display:inline-flex;text-align: center;align-items:center;padding:4px 10px;border-radius:999px;border:1px solid var(--border);font-size:var(--pillfs);line-height:1.1}
+.ok{background:var(--ok-bg);color:#9be5a8;border-color:#1c4a29}
+.warn{background:var(--wr-bg);color:#f3d17a;border-color:#4a3a1c}
+.bad{background:var(--bd-bg);color:#f4a7a7;border-color:#4a1c1c}
+button{background:#2a2f3b;color:#e8ecf1;border:1px solid #3a4050;border-radius:10px;padding:10px 14px;cursor:pointer;font-size:var(--pillfs);min-height:44px}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.danger{background:#3a2430;border-color:#5a3242}
+.cardbox > * { min-width: 0; }
+.panel.info > .content{ display:grid; grid-template-rows: 1fr 1fr; gap:12px; overflow:hidden; }
+.scry-half, .review-half { min-height:0; display:flex; flex-direction:column; gap:10px; overflow:auto; }
+.revhead { display:flex; align-items:center; gap:10px; justify-content:space-between; }
+.revlist { display:flex; flex-direction:column; gap:8px; overflow:auto; }
+.revitem { display:flex; align-items:center; gap:10px; padding:8px; border:1px solid #2a2f3b; border-radius:10px; cursor:pointer; }
+.revitem .thumb { width:64px; height:90px; object-fit:cover; border-radius:6px; border:1px solid #2a3140; }
+.subline, .textbox, .links, .meta { overflow-wrap:anywhere; word-break:normal; }
+.links { white-space:normal; }
+
+/* ROI overlay (draggable & resizable) */
+#roiOverlay{
+  position:absolute; left:10%; top:10%; width:80%; height:80%;
+  border:2px dashed rgba(120,200,255,.95);
+  outline:9999px solid rgba(0,0,0,.28); /* dim outside */
+  box-shadow: inset 0 0 0 1px rgba(20,50,80,.5);
+  cursor:move; user-select:none; touch-action:none;
+  z-index:10;  /* keep on top of the <img> */
+}
+#roiOverlay .h{position:absolute;width:14px;height:14px;background:#7bc1ff;border:2px solid #0b2b46;border-radius:50%;z-index:11}
+#roiOverlay .h.nw{left:-9px;top:-9px;cursor:nwse-resize}
+#roiOverlay .h.ne{right:-9px;top:-9px;cursor:nesw-resize}
+#roiOverlay .h.se{right:-9px;bottom:-9px;cursor:nwse-resize}
+#roiOverlay .h.sw{left:-9px;bottom:-9px;cursor:nesw-resize}
+/* ---- Export CSV checklist ---- */
+.mm-checklist{
+  display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 14px;
+  max-height:50vh; overflow:auto; border:1px solid #242b36; border-radius:10px;
+  padding:8px; background:#0f1115;
+}
+.mm-check{ display:flex; align-items:center; gap:8px; font-size:14px; }
+.mm-check input{ width:16px; height:16px; }
+
+/* ===== Scryfall card display ===== */
+#cardinfo{ display:flex; flex-direction:column; gap:12px; }
+.cardbox{ display:grid; grid-template-columns: 1.1fr 1.4fr; gap:14px; }
+.cardbox .left{ display:flex; align-items:flex-start; justify-content:center; }
+.cardbox .art{ width:100%; height:auto; border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.45); }
+.cardbox .right{ display:flex; flex-direction:column; gap:10px; overflow:auto; min-height:0; }
+.title{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+.name{ font-size:clamp(18px,2.2vw,28px); font-weight:700; line-height:1.1; }
+.mana{ opacity:.9; font-family:ui-monospace,monospace; }
+.subline{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.tag{ display:inline-flex; align-items:center; padding:4px 8px; border-radius:999px; background:#1b1f2a; border:1px solid #2a3140; font-size:12px; }
+.seticon{ width:22px; height:22px; opacity:.85; }
+.textbox{ background:linear-gradient(180deg,#141824,#0f121a); border:1px solid #242a36; border-radius:12px; padding:10px; }
+.textbox .oracle{ font-size:13px; line-height:1.35; }
+.textbox .flavor{ font-size:12px; opacity:.8; font-style:italic; margin-top:6px; }
+.keywords{ margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
+.prices .phead{ font-weight:600; margin-bottom:4px; }
+.prices .prow{ display:flex; flex-wrap:wrap; gap:6px; }
+.meta{ display:flex; flex-wrap:wrap; gap:6px; }
+.legal{ display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:6px; font-size:12px; }
+.legal .leg{ background:#141824; border:1px solid #252a37; border-radius:10px; padding:6px 8px; display:flex; justify-content:space-between; }
+.legal .ok{ color:#9be5a8; }
+.legal .no{ color:#f4a7a7; opacity:.9; }
+.hidden { display: none !important; }
+.input {
+  width: 100%;
+  border-radius: 0.75rem;
+  background-color: #27272a;
+  border: 1px solid #3f3f46;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  outline: none;
+}
+.input:focus {
+  box-shadow: 0 0 0 2px #2563eb;
+  border-color: #2563eb;
+}
+.mm-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.55);
+  /* backdrop-filter: blur(2px);  <-- remove this (causes jank) */
+  z-index: 70;
+}
+
+.mm-modal {
+  position: fixed; z-index: 80; width: 720px; max-width: calc(100vw - 40px);
+  background: #121418; border: 1px solid #222832; border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6); top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.mm-modal__header, .mm-modal__footer {
+  padding: 12px 14px; display: flex; align-items: center; gap: 10px;
+  background: #0e1014;
+}
+.mm-modal__body { padding: 14px; }
+.mm-title { font-size: 16px; font-weight: 600; color: #e5e7eb; }
+.mm-grid {
+  display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px;
+}
+.mm-field { display: flex; flex-direction: column; gap: 6px; color: #b7c0cd; }
+.mm-input {
+  background: #181c22; color: #e5e7eb; border: 1px solid #242b36;
+  border-radius: 10px; padding: 8px 10px; outline: none;
+}
+.mm-row { display: flex; gap: 8px; }
+.btn { padding: 8px 12px; border-radius: 999px; border: 1px solid #242b36; background:#1a1f27; color:#e5e7eb; }
+.btn:hover { background:#222834; }
+.btn-ghost { background: transparent; }
+.btn-primary { background:#2c7be5; border-color:#2c7be5; color:#fff; }
+.spacer { flex: 1; }
+
+/* ---- Edit Modal (legacy structure) ---- */
+.modal { position: fixed; inset: 0; z-index: 80; display: none; }
+.modal.show { display: block; }
+
+/* We already use the shared #filter-backdrop, so hide this inner one */
+.modal .backdrop { display: none; }
+
+.modal .card {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 720px; max-width: calc(100vw - 40px);
+  background: #121418; border: 1px solid #222832; border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6);
+  display: flex; flex-direction: column; overflow: hidden; z-index: 81;
+}
+.modal .head, .modal .body { padding: 12px 14px; }
+.modal .head { background:#0e1014; display:flex; align-items:center; justify-content:space-between; }
+
+/* app.css — console severities */
+.consolebox .sev{
+  display:inline-block; margin:0 6px 0 4px; padding:1px 6px;
+  border-radius:999px; font-weight:700; font-size:11px; letter-spacing:.2px;
+  border:1px solid transparent;
+}
+.consolebox .sev-ok   { color:#9be5a8; background:rgba(155,229,168,.12); border-color:rgba(155,229,168,.32); }
+.consolebox .sev-info { color:#8ab4ff; background:rgba(138,180,255,.12); border-color:rgba(138,180,255,.32); }
+.consolebox .sev-debug{ color:#b7bfcc; background:rgba(183,191,204,.10); border-color:rgba(183,191,204,.25); }
+.consolebox .sev-warn { color:#ffd28c; background:rgba(255,210,140,.14); border-color:rgba(255,210,140,.35); }
+.consolebox .sev-err  { color:#ff9b9b; background:rgba(255,155,155,.14); border-color:rgba(255,155,155,.35); }
+
+/* --- Settings modal form polish --- */
+:root{
+  --fg:#E6E8EE;
+  --fg-muted:#A7AFBD;
+  --bg-1:#0F1117;
+  --input-bg:#121722;
+  --input-border:#263043;
+  --input-hover:#2E3A52;
+  --ring:#6D8CFF; /* accent */
+  --radius:10px;
+}
+
+/* 2–4 responsive columns depending on width */
+.mm-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));
+  gap:16px 24px;
+}
+
+/* label + control stack */
+.mm-field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.mm-field label{
+  color:var(--fg-muted);
+  font-size:12px;
+  letter-spacing:.2px;
+}
+
+/* inputs + selects share a look */
+.mm-field input,
+.mm-field select{
+  width:100%;
+  padding:10px 12px;
+  border:1px solid var(--input-border);
+  background:var(--input-bg);
+  color:var(--fg);
+  border-radius:var(--radius);
+  outline:none;
+  font-size:14px;
+  font-variant-numeric:tabular-nums; /* tidy numeric alignment */
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+  transition:border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+}
+.mm-field input:hover,
+.mm-field select:hover{
+  border-color:var(--input-hover);
+}
+.mm-field input:focus,
+.mm-field select:focus{
+  border-color:var(--ring);
+  box-shadow:0 0 0 3px rgba(109,140,255,.25);
+}
+.mm-field input::placeholder{
+  color:var(--fg-muted);
+  opacity:.6;
+}
+
+/* nicer number boxes */
+.mm-field input[type=number]{
+  text-align:right;
+  appearance: textfield;
+  -moz-appearance:textfield;
+}
+.mm-field input[type=number]::-webkit-outer-spin-button,
+.mm-field input[type=number]::-webkit-inner-spin-button{
+  -webkit-appearance:none;
+  margin:0;
+}
+
+/* ROI 4-pack alignment */
+.mm-field .roi{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0,1fr));
+  gap:8px;
+}
+
+/* Give the form a bit of bottom padding above the sticky bar */
+#settings-form{ padding-bottom:80px; }
+
+/* ===== Console box ===== */
+.consolebox{
+  background:#0f1115; border:1px solid var(--border); border-radius:10px;
+  padding:8px; margin:0; font:12px/1.3 ui-monospace,Menlo,Consolas,monospace;
+  overflow:auto; white-space:pre-wrap;
+}
+.consolebox .t{ color:#a9adba; }
+.consolebox .g{ color:#7bc1ff; }
+
+/* Keep the whole crop visible, letterboxed if needed */
+.panel.crop .media-wrap { aspect-ratio: 63 / 88; }   /* reserve a card-shaped box */
+#live, #card, #cmpimg { width:100%; height:100%; max-height:100%; object-fit:contain; display:block; }
+
+@media (max-width:1200px){ .cardbox{ grid-template-columns:1fr; } }
+
+/* === Small-screen optimization (≤ ~720×480 landscape) === */
+@media (max-height:520px) and (min-width:640px){
+  :root{ --gap:8px; --pad:8px; --h2fs:14px; --pillfs:13px; }
+  .grid{ height:100vh; width:100vw; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr;
+    grid-template-areas:"live info" "crop cmp"; }
+  #status{ display:none !important; }
+  .panel h2{ padding:6px var(--pad); }
+  .media-wrap{ padding:4px; }
+  button{ min-height:44px; padding:8px 12px; }
+  .cardbox{ grid-template-columns: 1fr; gap:10px; }
+}
+.mm-help { font-size: 12px; opacity: .8; }
+.mm-tab { padding:6px 10px; border:1px solid #242b36; border-radius:999px; background:#151821; cursor:pointer; }
+.mm-tab.active { background:#2c7be5; border-color:#2c7be5; color:#fff; }
+
+/* ===== Make the status console fill remaining space (no overflow) ===== */
+#status { display:flex; flex-direction:column; }
+#status > .content { flex: 0 0 auto; }
+#status .console-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  padding: var(--pad);
+  padding-top: 0;
+}
+#status .console-header { display:flex; justify-content:space-between; align-items:center; }
+#status #consoleBox { flex: 1 1 auto; min-height: 0; }
+/* Padded bars for status/ocr/printer pills */
+.pillbar {
+  padding: 8px 12px;
+  background: #10141b;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  gap: 8px 10px;               /* extra spacing between pills */
+}
+
+/* Padded toolbar for action buttons */
+.toolbar {
+  padding: 8px 12px;
+  background: #10141b;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* rounder “pill” buttons used around the UI (you already use .btn btn-pill) */
+.btn-pill { border-radius: 999px; }
+
+/* tiny breathing room where rows sit inside panels */
+.panel .content > .row { margin-bottom: 4px; }
+
+/* Settings section dividers and headers */
+.mm-section {
+  border-top: 1px solid #242b36;
+  margin-top: 16px;
+  padding-top: 12px;
+}
+
+.mm-section:first-child {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.mm-section h3 {
+  margin: 0 0 8px;
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: .2px;
+  color: var(--fg);
+  opacity: .95;
+}
+
+/* Optional: keep headers visible while scrolling the modal body */
+#settings-modal .mm-modal__body { position: relative; }
+.mm-section h3.sticky {
+  position: sticky; top: 0;
+  background: #121418; padding: 6px 0; z-index: 5;
+  border-bottom: 1px solid #1e2430;
+}

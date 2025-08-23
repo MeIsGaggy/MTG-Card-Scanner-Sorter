@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtg-scanner"
+version = "0.1.0"   # <-- change this line
+description = "MTG card scanner web app (Flask + OpenCV)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Community Non-Commercial License (Modified MIT)"}
+authors = [{ name = "N. Rooney", email = "n.d.rooney@hotmail.ca" }]
+
+
+dependencies = [
+  "Flask>=2.3",
+  "Werkzeug>=2.3",
+  "opencv-python>=4.8",
+  "numpy>=1.24",
+  "requests>=2.31",
+  "rapidocr-onnxruntime>=1.3",
+  "pytesseract>=0.3",
+  "rapidfuzz>=3.5",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+mtg-scanner = "mtg_scanner.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mtg_scanner = ["templates/*.html", "static/**/*", "settings.example.json"]
