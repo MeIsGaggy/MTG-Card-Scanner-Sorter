@@ -10,6 +10,13 @@ A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering card
 * **Reliability:** I've done my best to get this to be as stable and reliable as possible so far. Based on my current testing it will correctly read the card over 90% of the time. Given the odd special foil or layout it may have a hard time. That's why I have a comaparison that runs after the OCR to compare the card scanned to the one it thinks it is. If it's below the set tollerance, it will flag it for manual review. 
 
 ---
+## 🛠️Testing Hardware On
+
+* **Raspberry Pi 5 - 8GB**
+* **Creatlity Ender 3 S1 Pro**
+* **Google Pixel 7 Pro (as USB Webcam)**
+
+---
 
 ## ✨ Features
 
