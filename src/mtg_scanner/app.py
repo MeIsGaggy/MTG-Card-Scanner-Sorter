@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import time as _t
-_BOOT_LOG = []  # (level, ts, tag, msg)
+_BOOT_LOG = []
 
-# in app.py (top-level, after imports)
 import os
 from .update import get_current_version, check_for_update_async
 
@@ -10,7 +9,6 @@ from .update import get_current_version, check_for_update_async
 REPO = os.environ.get("MTG_SCANNER_REPO")
 if REPO:
     def _on_update(res):
-        # Uses your logger; shows up in the UI console
         _dbg("UPDATE", f"Latest {res['latest']} available at {res['html_url']}" if res["is_update"]
                       else f"Up to date (v{res['current']})")
     check_for_update_async(REPO, get_current_version(), on_result=_on_update)
@@ -62,7 +60,6 @@ except Exception:
     process = fuzz = None
     _dbg("RAPID FUZZ", "RapidFuzz not available; fuzzy matching disabled.")
 
-# ---- System tuning
 CORES = os.cpu_count() or 4
 os.environ.setdefault("OMP_NUM_THREADS", str(CORES - 2))
 os.environ.setdefault("ORT_NUM_THREADS", str(CORES - 2))
@@ -72,15 +69,13 @@ try:
 except Exception:
     pass
 
-# label for UI
 PRIMARY_PROVIDER_LABEL = "RapidOCR" if "rapidocr" in (OCR_BACKEND or "").lower() else "Tesseract"
 
-# Map each MDFC face name -> combined name ("Front // Back")
 DFC_FACE_TO_COMBINED = {}
 DFC_FACE_TO_COMBINED_NORM = {}
 
 _scryfall_once_lock = threading.Lock()
-_scryfall_once = {}   # key -> {"evt": Event, "result": any, "ts": float}
+_scryfall_once = {} 
 
 SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "./settings.json")
 
@@ -107,14 +102,12 @@ try:
 except Exception:
     pass
 
-# Preallocate reusable OpenCV objects / kernels (avoid per-frame allocs)
 try:
     _K1 = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
     _K2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 except Exception:
     _K1 = _K2 = None
 
-# Reusable ORB and matcher
 try:
     _ORB = cv2.ORB_create(nfeatures=MATCH_ORB_FEATURES, fastThreshold=10, scaleFactor=1.2)
 except Exception:
@@ -124,7 +117,6 @@ try:
 except Exception:
     _BF = None
 
-# Ensure on-disk Scryfall image cache exists
 try:
     os.makedirs(SC_IMG_CACHE_DIR, exist_ok=True)
 except Exception:
@@ -141,16 +133,15 @@ def _push_log(tag: str, msg: str, level: int = 1):
     try:
         t = str(tag or "")
         m = str(msg or "")
-        lvl = int(level or 1)   # 0=OK, 1=INFO, 2=DEBUG, 3=WARN, 4=ERROR
+        lvl = int(level or 1) 
 
-        # heuristic: upgrade/downgrade by keywords in tag/message
         U = (t + " " + m).upper()
         if ("ERROR" in U) or ("EXCEPTION" in U) or ("TRACEBACK" in U):
             lvl = max(lvl, 4)
-        elif "WARN" in U:                      # WARNING / WARN
+        elif "WARN" in U:                     
             lvl = max(lvl, 3)
         elif ("SCAN_OK" in U) or ("SUCCESS" in U) or ("CONNECTED" in U):
-            lvl = min(lvl, 0)                  # OK / success-ish
+            lvl = min(lvl, 0)              
 
         with log_lock:
             LOG_SEQ += 1
@@ -186,13 +177,11 @@ def _scryfall_lookup_once(name, number_raw, set_hint, seq):
             return res
         finally:
             evt.set()
-            # cleanup old entries opportunistically
             with _scryfall_once_lock:
                 stale = [k for k,v in _scryfall_once.items() if now - v["ts"] > 60]
                 for k in stale:
                     _scryfall_once.pop(k, None)
     else:
-        # Wait briefly for the other worker to finish
         evt.wait(timeout=5.0)
         with _scryfall_once_lock:
             entry = _scryfall_once.get(key)
@@ -258,12 +247,11 @@ if _repo:
 
 @app.context_processor
 def inject_version():
-    # lets templates access {{ APP_VERSION }} if we ever use it
+
     return {"APP_VERSION": APP_VERSION}
 
 @app.get("/")
 def index():
-    # Main UI
     return render_template("index.html")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
