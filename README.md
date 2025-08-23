@@ -78,7 +78,7 @@ mtg-scanner
 
 Open a browser to `http://<raspberrypi>:5000` (or whatever host/port you configured).
 
-> settings.json can be created within the app by opening the App Settings then clicking on Save
+> settings.json can be created within the app by opening the App Settings then clicking on Save.
 > Repo does not need to be set. This is for following my updates, or can be changed to follow your own if you fork
 
 ---
