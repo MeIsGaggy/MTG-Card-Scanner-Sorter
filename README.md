@@ -65,7 +65,7 @@ If there is an update available, it will be logged in the apps console. Run the 
 pip install --upgrade --force-reinstall \
   "git+https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter@[VERSION CODE]#egg=mtg_scanner"
 ```
-Where is states [VERSION CODE] you need to paste the vX.X.X from the latest release
+Where it states [VERSION CODE] you need to paste the vX.X.X from the latest release
 ---
 
 ## 🚀 Quick start (Exports are optional)
