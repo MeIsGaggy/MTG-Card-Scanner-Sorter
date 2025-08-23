@@ -243,7 +243,10 @@
     <button id="settings-save"  class="btn btn-pill btn-primary">Save</button>
   </div>
 </div>
-
+<div id="version-chip" class="version-chip">
+  <span class="label">Version:</span>
+  <span id="vnum">…</span>
+</div>
 
   <script>
 (function(){
@@ -257,6 +260,34 @@
     document.body.appendChild(alt);
   };
   document.body.appendChild(s);
+})();
+(function () {
+  function setVer(cur, latest, url, isUpdate) {
+    const chip = document.getElementById('version-chip');
+    const vnum = document.getElementById('vnum');
+    if (!chip || !vnum) return;
+
+    if (isUpdate && latest && latest !== cur) {
+      chip.style.background = 'rgba(255,185,0,.9)';
+      chip.style.color = '#000';
+      vnum.innerHTML = url
+        ? `v${cur} → <a href="${url}" target="_blank" rel="noopener">v${latest}</a>`
+        : `v${cur} → v${latest}`;
+    } else {
+      vnum.textContent = `v${cur || '0.0.0'}`;
+    }
+  }
+
+  function refreshOnce() {
+    fetch('/api/version?ts=' + Date.now(), { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => j && setVer(j.current, j.latest, j.html_url, j.is_update))
+      .catch(() => setVer('0.0.0'));
+  }
+
+  refreshOnce();
+  // one more pass after 5s in case the async update check finishes later
+  setTimeout(refreshOnce, 5000);
 })();
 </script>
 </body>

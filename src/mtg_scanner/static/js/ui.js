@@ -933,6 +933,8 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
   modal?.addEventListener("click", (e) => { if (e.target === modal || e.target.classList.contains("backdrop")) closeEditModal(); });
   window.addEventListener("keydown", (e) => { if (e.key === "Escape" && modal?.classList.contains("show")) closeEditModal(); });
 
+
+
   if (eiSearch) eiSearch.onclick = function () {
     const qs = new URLSearchParams({ name: eiName.value || "", number: eiNum.value || "", set: eiSet.value || "" });
     fetch("/api/scrysearch?" + qs.toString())
@@ -1025,6 +1027,29 @@ function selectedFields(){
   return Array.from(document.querySelectorAll('#export-field-list input[type=checkbox]'))
     .filter(cb => cb.checked).map(cb => cb.dataset.f);
 }
+
+window.addEventListener('DOMContentLoaded', () => {
+  const chip = document.getElementById('version-chip');
+  if (!chip) return;
+
+  fetch('/api/version')
+    .then(r => r.json())
+    .then(info => {
+      const cur = info.current || '0.0.0';
+      const latest = info.latest || cur;
+      if (info.is_update) {
+        chip.style.background = 'rgba(255,185,0,.9)';
+        chip.style.color = '#000';
+        chip.innerHTML = info.html_url
+          ? `<a href="${info.html_url}" target="_blank" rel="noopener">v${cur} → v${latest}</a>`
+          : `v${cur} → v${latest}`;
+      } else {
+        chip.textContent = `v${cur}`;
+      }
+    })
+    .catch(() => { chip.textContent = 'v0.0.0'; });
+});
+
 
 // modal buttons
 document.getElementById('export-selectall')?.addEventListener('click', ()=>{

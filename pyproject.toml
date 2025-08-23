@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mtg-scanner"
-version = "0.1.0"   # <-- change this line
+version = "0.1.1"   # <-- change this line
 description = "MTG card scanner web app (Flask + OpenCV)"
 readme = "README.md"
 requires-python = ">=3.9"

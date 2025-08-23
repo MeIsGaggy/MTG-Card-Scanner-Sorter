@@ -34,6 +34,16 @@ button.danger{background:#3a2430;border-color:#5a3242}
 .subline, .textbox, .links, .meta { overflow-wrap:anywhere; word-break:normal; }
 .links { white-space:normal; }
 
+.version-chip{
+  position:fixed; right:12px; bottom:12px;
+  background:rgba(0,0,0,.75); color:#fff;
+  padding:6px 10px; border-radius:10px;
+  font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  z-index:9999; user-select:none;
+}
+.version-chip a{ color:inherit; text-decoration:none; }
+
+
 /* ROI overlay (draggable & resizable) */
 #roiOverlay{
   position:absolute; left:10%; top:10%; width:80%; height:80%;

@@ -4,7 +4,8 @@ _BOOT_LOG = []  # (level, ts, tag, msg)
 
 # in app.py (top-level, after imports)
 import os
-from mtg_scanner.update import get_current_version, check_for_update_async
+from .update import get_current_version, check_for_update_async
+
 
 REPO = os.environ.get("MTG_SCANNER_REPO")
 if REPO:
@@ -231,6 +232,34 @@ if DEBUG_SAVE_ROI:
 # =========================
 app = Flask(__name__, static_folder='static', template_folder='templates')
 
+APP_VERSION = get_current_version()
+UPDATE_INFO = {'current': APP_VERSION, 'latest': APP_VERSION, 'is_update': False, 'html_url': ''}
+    
+def ui_js_fallback():
+    p = os.path.join(APP_DIR, "static", "js", "ui.js")
+    try:
+        return send_file(p, mimetype="application/javascript")
+    except Exception:
+        return Response("/* ui.js missing */", mimetype="application/javascript")
+
+_repo = os.environ.get("MTG_SCANNER_REPO")
+if _repo:
+    def _on_update(res):
+        global UPDATE_INFO
+        UPDATE_INFO = res
+        try:
+            _dbg("UPDATE", f"latest {res.get('latest')} available={res.get('is_update')} {res.get('html_url','')}")
+        except Exception:
+            print("[UPDATE]", res)
+    try:
+        check_for_update_async(_repo, APP_VERSION, on_result=_on_update)
+    except Exception as _e:
+        print("[UPDATE] check failed:", _e)
+
+@app.context_processor
+def inject_version():
+    # lets templates access {{ APP_VERSION }} if we ever use it
+    return {"APP_VERSION": APP_VERSION}
 
 @app.get("/")
 def index():
@@ -2587,9 +2616,9 @@ def parse_roi_csv(s: str):
 @app.get("/ui.js")
 def serve_ui_js():
     path = os.path.join(APP_DIR, "ui.js")
-    if os.path.exists(path):
-        return send_file(path, mimetype="application/javascript")
-    return Response("// ui.js not found", mimetype="application/javascript", status=404)
+    return send_file(path, mimetype="application/javascript") if os.path.exists(path) \
+           else Response("// ui.js not found", mimetype="application/javascript", status=404)
+
 
 @app.get("/favicon.ico")
 def favicon():
@@ -3813,6 +3842,38 @@ def _start_workers():
     threading.Thread(target=ws_thread,        daemon=True).start()
     threading.Thread(target=autoscan_manager, daemon=True).start()
 
+
+
+# --- Legacy static fallbacks (in case of reverse proxies or path quirks) ---
+@app.get("/ui.js")
+def _legacy_ui_js():
+    return send_from_directory(app.static_folder, "js/ui.js")
+
+@app.get("/app.css")
+def _legacy_app_css():
+    return send_from_directory(app.static_folder, "css/app.css")
+
+# Quick debug endpoint to verify paths on device
+@app.get("/_debug/static")
+def _debug_static():
+    return {
+        "static_folder": app.static_folder,
+        "template_folder": app.template_folder,
+        "ui_js_exists": os.path.exists(os.path.join(app.static_folder, "js", "ui.js")),
+        "css_exists": os.path.exists(os.path.join(app.static_folder, "css", "app.css")),
+    }
+@app.context_processor
+def inject_version():
+    return {"APP_VERSION": APP_VERSION}
+
+@app.get("/api/version")
+def api_version():
+    # Return the most recent update info we have
+    info = dict(UPDATE_INFO)
+    info["current"] = APP_VERSION
+    return jsonify(info)
+
+
 # ---------------------------
 # Graceful shutdown (fixed)
 # ---------------------------
@@ -3878,23 +3939,3 @@ if __name__ == "__main__":
         pass
     run_server(HOST, PORT)
 
-
-
-# --- Legacy static fallbacks (in case of reverse proxies or path quirks) ---
-@app.get("/ui.js")
-def _legacy_ui_js():
-    return send_from_directory(app.static_folder, "js/ui.js")
-
-@app.get("/app.css")
-def _legacy_app_css():
-    return send_from_directory(app.static_folder, "css/app.css")
-
-# Quick debug endpoint to verify paths on device
-@app.get("/_debug/static")
-def _debug_static():
-    return {
-        "static_folder": app.static_folder,
-        "template_folder": app.template_folder,
-        "ui_js_exists": os.path.exists(os.path.join(app.static_folder, "js", "ui.js")),
-        "css_exists": os.path.exists(os.path.join(app.static_folder, "css", "app.css")),
-    }
