@@ -1,26 +1,126 @@
-Community Non-Commercial License (Modified MIT)
+Community Non-Commercial License v1.1 (CNC-1.1) — With Attribution
+SPDX-License-Identifier: LicenseRef-CNC-Attribution-1.1
 
-Copyright (c) 2025 MeIsGaggy
+Copyright (c) [2025] [MeIsGaggy]
+Project: [MTG-Card-Scanner-Sorter]
+Repository: [https://github.com/MeIsGaggy/MTG-Card-Scanner]
+Contact for Commercial Use: [n.d.rooney@hotmail.ca]
 
-Permission is hereby granted, free of charge, to any individual obtaining a copy
-of this software and associated documentation files (the "Software"), to use, copy,
-modify, and merge the Software for personal, non-commercial projects only, subject
-to the following conditions:
+0. Definitions
+   “Software” means the source code, object code, documentation, and other
+   files in this repository and any copies or substantial portions thereof.
+   “Licensor” means the copyright holder(s) listed above.
+   “You” (or “Your”) means the individual or entity exercising rights under
+   this License.
+   “Derivative Works” means works based on or incorporating the Software.
+   “Distribute” means to make the Software or Derivative Works available to
+   any third party in any form, including by hosting it as a service.
+   “Commercial Use” means any use intended for or directed toward commercial
+   advantage or monetary compensation, including (a) use by or for the benefit
+   of a for-profit entity; (b) providing the Software or Derivative Works, or
+   functionality thereof, to third parties as a product or service (including
+   SaaS or hosted services); (c) distribution that is conditioned on payment;
+   or (d) use in advertising-supported or revenue-generating offerings.
+   “Non-Commercial Use” means any use that is not Commercial Use. Non-profit
+   academic and personal hobbyist use are Non-Commercial Use.
+   “User Interface” means any user-facing UI, including GUI, web UI, mobile
+   UI, command-line help/version output, or an “About”/“Credits” screen/page.
+   “Attribution Notice” means the following credit (or a reasonable localized
+   equivalent): “Includes [Project-Name] by [MeIsGaggy] — [Repo-URL]”.
 
-1. Corporate use, for-profit use, commercial distribution, sublicensing,
-   or sale of the Software, in whole or in part, is strictly prohibited
-   without prior written permission from the copyright holder.
+1. License Grant (Non-Commercial)
+   Subject to the terms and conditions of this License, Licensor hereby grants
+   You a worldwide, royalty-free, non-exclusive, perpetual license (revocable
+   only as stated in Section 7) to, for Non-Commercial Use only:
+   (a) use, reproduce, and display the Software;
+   (b) modify the Software and create Derivative Works; and
+   (c) Distribute the Software and Derivative Works in source or object form.
+   Conditions: If You Distribute the Software or any Derivative Works, You must
+   (i) include this License and the above copyright notice; (ii) keep all
+   notices intact; (iii) clearly indicate any changes You made; and
+   (iv) satisfy the Attribution Requirement in Section 5.
 
-2. Any use outside of personal, non-commercial projects must be explicitly
-   requested and approved by the copyright holder.
+2. Restrictions
+   2.1 Commercial Use is prohibited without a separate written agreement with
+       Licensor. To obtain a commercial license, contact Licensor at the email
+       above.
+   2.2 You may not sublicense the Software, except that You may convey the
+       Software and Your Derivative Works to third parties under this same
+       License for Non-Commercial Use.
+   2.3 No trademark or trade name rights are granted by this License.
+   2.4 You may not remove or alter any copyright, patent, or attribution
+       notices in the Software.
+   2.5 You may not misrepresent the origin of the Software or Derivative Works.
 
-3. The above copyright notice and this permission notice shall be included
-   in all copies or substantial portions of the Software.
+3. Patent Grant (Non-Commercial)
+   Each Contributor (Licensor and any party whose contribution is accepted into
+   the Software) grants You a non-exclusive, worldwide, royalty-free patent
+   license under its Necessary Claims that are infringed by the Software, to
+   make, use, and Distribute the Software and Derivative Works for
+   Non-Commercial Use. This patent license terminates immediately if You or
+   Your affiliate initiate a patent claim alleging that the Software or a
+   Derivative Work infringes a patent.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+4. Contributions
+   By submitting a contribution to the Software that is accepted by Licensor,
+   You: (a) license Your contribution under this License for Non-Commercial
+   Use; and (b) grant Licensor a perpetual, irrevocable right to use,
+   relicense, and distribute Your contribution for Commercial Use, including as
+   part of commercial licenses. You represent that You have the right to grant
+   these rights.
+
+5. Attribution & Notices (Attribution Requirement)
+   5.1 If You Distribute the Software or any Derivative Work in a form that is
+       accessible by end users (including hosted services), You must provide a
+       clear and reasonably prominent Attribution Notice:
+       (a) within the User Interface (e.g., an “About”/“Credits” screen or a
+           “Help → About” dialog; for CLI tools, in “--version” or “--help”
+           output); or
+       (b) if the distribution has no User Interface, in the primary README,
+           documentation, or packaging materials accompanying the distribution.
+   5.2 For web/mobile apps, the Attribution Notice may appear in an “About”,
+       “Credits”, settings, or legal page accessible from the app’s primary
+       menu or footer. For hosted services, it may appear in the site footer or
+       an “About”/“Credits” page linked from the footer or settings.
+   5.3 The Attribution Notice may include additional acknowledgments, but must
+       at least name the Project and Licensor and include the Repository URL.
+       Attribution does not imply endorsement by Licensor.
+
+6. Hosting as a Service
+   Making the Software or its functionality available to third parties over a
+   network is a form of Distribution and must comply with Sections 1 and 5.
+   Commercial hosting is not permitted without a commercial license.
+
+7. Termination
+   This License terminates automatically if You breach it. If You cure the
+   breach within 30 days of receiving notice from Licensor, Your license is
+   reinstated (once). Persistent or subsequent breaches permanently terminate
+   this License. Upon termination, You must stop using and Distributing the
+   Software and Derivative Works, but past sublicenses granted in compliance
+   with this License remain in effect.
+
+8. Disclaimer of Warranty
+   THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. THE ENTIRE RISK AS
+   TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH YOU.
+
+9. Limitation of Liability
+   IN NO EVENT SHALL LICENSOR OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+   DEALINGS IN THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+10. Governing Law; Venue
+   This License is governed by the laws of the Province of Ontario, Canada and
+   the federal laws of Canada applicable therein, without regard to conflicts
+   of law rules. The parties consent to the non-exclusive jurisdiction and
+   venue of the courts located in Ontario, Canada.
+
+11. Miscellaneous
+   If any provision of this License is unenforceable, the remainder shall
+   remain in full force and effect. This License is the entire agreement
+   between You and Licensor concerning the Software. No waiver is effective
+   unless in writing and signed by Licensor.
+
+END OF TERMS
