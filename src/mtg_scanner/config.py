@@ -95,7 +95,7 @@ MATCH_W_ORB  = _get("MATCH_W_ORB",  0.40, float)
 MATCH_TH     = _get("MATCH_TH",     0.50, float)
 NAME_OK_TH   = _get("NAME_OK_TH",   60.0, float)
 ALWAYS_SCAN_OK = _get("ALWAYS_SCAN_OK", 1, bool)
-MATCH_USE_ART  = _get("MATCH_USE_ART", 0, bool)
+MATCH_USE_ART  = _get("MATCH_USE_ART", 1, bool)
 
 # =========================
 # SCRYFALL / PRICES

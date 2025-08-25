@@ -565,26 +565,61 @@ def _deckline(name: str, count: int, set_code: str, cn: str, fmt: str):
 
 def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, flagged, status=None):
     """Create a review record and persist it."""
-    global scan_id_seq, scan_history  # (no assignment to history_lock here)
+    global scan_id_seq, scan_history
     sid = int(time.time()*1000) + (scan_id_seq % 1000)
     scan_id_seq += 1
+
     cmp_jpg = None
     if cmp_details:
         vis = _render_compare_visual(cmp_details)
         if vis is not None:
             cmp_jpg = _jpeg_bytes(vis, JPEG_QUALITY_CMP)
 
+    # --- Build review reasons & optional name auto-fix ---
+    review_reasons = []
+    match_mode = (scry or {}).get("_match_mode")
+    auto_name_fix = False
+
+    # If Scryfall was found by CN+SET (or CN only), note that title was unreliable
+    if match_mode in ("cn_set_only", "cn_only"):
+        review_reasons.append("Card name not reliably read — identified by set + collector number.")
+
+    # Visual match failed → reason
+    try:
+        ms = float(match_score)
+    except Exception:
+        ms = 0.0
+    if match_ok is False:
+        try:
+            th = float(MATCH_TH)
+        except Exception:
+            th = 0.0
+        review_reasons.append(f"Scryfall candidate did not visually match (score {ms:.2f} below threshold {th:.2f}).")
+
+    # No Scryfall at all → reason
+    if not scry:
+        review_reasons.append("No Scryfall result; manual selection required.")
+
+    # Your requested behavior:
+    # If we matched by cn_set_only and the visual match passed, fix the saved name to Scryfall's.
+    if (match_mode == "cn_set_only") and bool(match_ok) and scry and scry.get("name"):
+        ocr = dict(ocr or {})
+        ocr["name"] = scry.get("name") or ocr.get("name") or ""
+        auto_name_fix = True
+        flagged = True  # still flag for review as requested
+        review_reasons.append("Name auto-corrected from OCR to Scryfall (cn_set_only + visual match passed).")
+
     entry = {
         "id": sid,
         "ts": time.time(),
-        "name": ocr.get("name") or ocr.get("name_raw") or "",
-        "name_conf": float(ocr.get("name_conf", 0.0)),
-        "number": ocr.get("number") or "",
-        "number_raw": ocr.get("number_raw") or "",
-        "set_hint": ocr.get("set_hint") or "",
-        "foil": bool(ocr.get("foil", False)),
-        "match_score": round(float(match_score), 3),
-        "match_ok": bool(match_ok),
+        "name": (ocr or {}).get("name") or (ocr or {}).get("name_raw") or "",
+        "name_conf": float((ocr or {}).get("name_conf", 0.0)),
+        "number": (ocr or {}).get("number") or "",
+        "number_raw": (ocr or {}).get("number_raw") or "",
+        "set_hint": (ocr or {}).get("set_hint") or "",
+        "foil": bool((ocr or {}).get("foil", False)),
+        "match_score": round(float(ms), 3),
+        "match_ok": bool(match_ok) if match_ok is not None else None,
         "flagged": bool(flagged),
         "status": status or ("pass" if match_ok else "fail"),
         "scry": scry,
@@ -592,7 +627,13 @@ def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, fla
         "snap_jpg": _jpeg_bytes(snap_img, JPEG_QUALITY_SNAP),
         "thumb": _make_thumb(snap_img, 120),
         "cmp_jpg": cmp_jpg,
+
+        # NEW: rich review context
+        "review_reasons": review_reasons,
+        "auto_name_fix": bool(auto_name_fix),
+        "scry_match_mode": match_mode or "none",
     }
+
     with history_lock:
         scan_history.insert(0, entry)
         _persist_entry_to_disk(entry)
@@ -1442,6 +1483,14 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
     cn_norm = _normalize_cn_for_search(number_raw)
     set_hint = (set_hint or "").lower()
 
+    # helper: annotate chosen card with how we matched
+    def _ret(card, how):
+        try:
+            card["_match_mode"] = how
+        except Exception:
+            pass
+        return card
+
     # If we have no name, skip the name queries but DO try cn+set / cn fallbacks.
     if not nm_orig:
         def fetch(url, params=None):
@@ -1452,13 +1501,13 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
             data = fetch("https://api.scryfall.com/cards/search",
                          {"q": f"cn:{cn_norm} set:{set_hint}", "unique":"prints","order":"released","dir":"desc"})
             if data and data.get("data"):
-                return data["data"][0]
+                return _ret(data["data"][0], "cn_set_only")
 
         if cn_norm:
             data = fetch("https://api.scryfall.com/cards/search",
                          {"q": f"cn:{cn_norm}", "unique":"prints","order":"released","dir":"desc"})
             if data and data.get("data"):
-                return data["data"][0]
+                return _ret(data["data"][0], "cn_only")
         return None
 
     # Prepare keys
@@ -1468,7 +1517,6 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
 
     # Expand candidate names: original + MDFC combined (if OCR saw only a face)
     candidates = [nm_orig]
-    # face -> combined (exact and normalized)
     nm_l = nm_orig.lower()
     if nm_l in DFC_FACE_TO_COMBINED:
         candidates.append(DFC_FACE_TO_COMBINED[nm_l])
@@ -1477,7 +1525,6 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
         if nk in DFC_FACE_TO_COMBINED_NORM:
             candidates.append(DFC_FACE_TO_COMBINED_NORM[nk])
 
-    # Try each candidate name through the standard flow
     def _try_named(nm):
         matched_by = "none"
         choice = None
@@ -1507,9 +1554,9 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
                     if not cand and cn_norm:
                         cand = next((c for c in plist if norm_cn(c.get("collector_number")) == cn_norm), None)
                     if cand:
-                        return cand, "prints_refine"
+                        return _ret(cand, "prints_refine"), "prints_refine"
             if not choice:
-                return exact, "exact"
+                return _ret(exact, "exact"), "exact"
 
         # 2) explicit search by name + cn (+ set if present)
         if cn_norm:
@@ -1523,12 +1570,12 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
                     data = fetch("https://api.scryfall.com/cards/search",
                                 {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
                     if data and data.get("data"):
-                        return data["data"][0], "search_name_field_cn"
+                        return _ret(data["data"][0], "search_name_field_cn"), "search_name_field_cn"
             if set_hint: q += f" set:{set_hint}"
             data = fetch("https://api.scryfall.com/cards/search",
                          {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
             if data and data.get("data"):
-                return data["data"][0], "search_name_cn"
+                return _ret(data["data"][0], "search_name_cn"), "search_name_cn"
 
         # 3) fuzzy by name (then refine by prints if possible)
         fuzzy = fetch("https://api.scryfall.com/cards/named", {"fuzzy": nm})
@@ -1546,8 +1593,8 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
                     if not cand and cn_norm:
                         cand = next((c for c in plist if norm_cn(c.get("collector_number")) == cn_norm), None)
                     if cand:
-                        return cand, "fuzzy_prints_refine"
-            return fuzzy, "fuzzy"
+                        return _ret(cand, "fuzzy_prints_refine"), "fuzzy_prints_refine"
+            return _ret(fuzzy, "fuzzy"), "fuzzy"
 
         return None, "none"
 
@@ -1572,7 +1619,7 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
         data = fetch("https://api.scryfall.com/cards/search",
                      {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
         if data and data.get("data"):
-            choice = data["data"][0]
+            choice = _ret(data["data"][0], "cn_set_only")
             _scry_cache[(nm_orig.lower(), cn_norm, set_hint)] = choice
             _dbg("SCRYFALL", f"nm='{nm_orig}', set_hint='{set_hint}', cn_norm='{cn_norm}', matched_by='cn_set_only'")
             return choice
@@ -1582,7 +1629,7 @@ def _scryfall_lookup(name, number_raw, set_hint=""):
         data = fetch("https://api.scryfall.com/cards/search",
                      {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
         if data and data.get("data"):
-            choice = data["data"][0]
+            choice = _ret(data["data"][0], "cn_only")
             _scry_cache[(nm_orig.lower(), cn_norm, set_hint)] = choice
             _dbg("SCRYFALL", f"nm='{nm_orig}', set_hint='{set_hint or '-'}', cn_norm='{cn_norm}', matched_by='cn_only'")
             return choice
@@ -1775,8 +1822,7 @@ def compare_snapshot_to_scryfall(snap_bgr, scry_bgr, return_details=False, scry_
     if MATCH_USE_ART:
         A0 = _crop_art(A0); B0 = _crop_art(B0)
 
-    # 2) obtain cached feats for reference; prepare normalized frames for A
-    ref_feats = _get_cached_reference_feats(scry_card, B0, use_art=MATCH_USE_ART, tgt=tgt) or {}
+    ref_feats = _get_cached_reference_feats(scry_card, scry_bgr, use_art=MATCH_USE_ART, tgt=tgt) or {}
     A_orb = cv2.resize(_normalize_illum(A0), tgt, interpolation=cv2.INTER_AREA)
     A_hist = cv2.resize(A0, tgt, interpolation=cv2.INTER_AREA)
 
@@ -2652,6 +2698,7 @@ def api_state():
         "match_score": 0.0,
         "match_ok": None,
         "flagged": False,
+        "review_reasons": [],
     }.items():
         state.setdefault(k, v)
 
@@ -3326,8 +3373,15 @@ def _effective_settings():
 
 @app.get("/api/settings")
 def api_settings_get():
-    # what the app is currently using (prefill UI)
-    return jsonify(_effective_settings())
+    # Prefer the saved file; fall back to effective if missing.
+    saved = _settings_load() or {}
+    eff   = _effective_settings()
+    # Merge defaults (eff) under saved so form is pre-filled nicely.
+    # Also return the path and effective values for debugging (UI ignores extras).
+    merged = {**eff, **saved}
+    merged["__path"] = os.path.abspath(SETTINGS_PATH)
+    merged["__effective"] = eff
+    return jsonify(merged)
 
 @app.post("/api/settings")
 def api_settings_post():
@@ -3337,7 +3391,6 @@ def api_settings_post():
     for k, v in list(incoming.items()):
         if isinstance(v, str) and v.lower() in ("true","false","1","0","on","off"):
             incoming[k] = v.lower() in ("true","1","on")
-        # allow ROI as CSV string
         if k.startswith("ROI_") and isinstance(v, str):
             try:
                 vals = [float(x.strip()) for x in v.split(",")]
@@ -3346,8 +3399,7 @@ def api_settings_post():
             except Exception:
                 pass
 
-    # merge with existing (so partial saves don’t wipe anything)
-    cur = _settings_load()
+    cur = _settings_load() or {}
     cur.update(incoming)
     _settings_save(cur)
 
@@ -3512,6 +3564,7 @@ def api_scans():
         "scry_name": (e.get("scry") or {}).get("name",""),
         "scry_set":  (e.get("scry") or {}).get("set",""),
         "scry_cn":   (e.get("scry") or {}).get("collector_number",""),
+        "review_reasons": e.get("review_reasons", []),
     } for e in out]
     return jsonify({"items": items, "total": total, "offset": offset, "limit": limit})
 

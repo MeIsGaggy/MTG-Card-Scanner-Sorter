@@ -48,8 +48,16 @@
   let historyQueryQS = "";
   let modalOpen = false;
 
-  function pill(cls, txt) { return '<span class="pill ' + cls + '">' + txt + '</span>'; }
-  function updatePills(el, pills) { if (el) el.innerHTML = (pills || []).map(p => pill(p.cls, p.txt)).join(""); }
+function pill(cls, txt, title) {
+  return '<span class="pill ' + cls + '"' +
+         (title ? ' title="' + String(title).replace(/"/g,'&quot;') + '"' : '') +
+         '>' + txt + '</span>';
+}
+function updatePills(el, pills) {
+  if (!el) return;
+  el.innerHTML = (pills || []).map(p => pill(p.cls, p.txt, p.title)).join("");
+}
+
   function money(val, cur) {
     cur = cur || "USD";
     if (val === null || val === undefined || Number.isNaN(val)) return "—";
@@ -297,15 +305,23 @@ btnLogClear?.addEventListener("click", () => {
               (flavor ? ('<div class="flavor">“' + flavor + "”</div>") : "") +
               (kw.length ? ('<div class="keywords">' + kw.map(tag).join(" ") + "</div>") : "") +
             "</div>" +
-            '<div class="prices"><div class="phead">Prices</div>' +
-              '<div class="prow">' +
-                (usd.n != null ? tag("Normal: " + money(usd.n) + " / " + money(cad.n, "CAD")) : "") +
-                (usd.f != null ? tag("Foil: " + money(usd.f) + " / " + money(cad.f, "CAD")) : "") +
-                (usd.e != null ? tag("Etched: " + money(usd.e) + " / " + money(cad.e, "CAD")) : "") +
-              "</div>" +
-            "</div>" +
-          "</div>" +
-        "</div>";
+            // ⬇️ Prices lives INSIDE .right now
+            (
+              (usd && (usd.n != null || usd.f != null || usd.e != null))
+                ? (
+                  '<div class="prices prices-below">' +
+                    '<div class="phead">Prices</div>' +
+                    '<div class="prow">' +
+                      (usd.n != null ? tag("Normal: " + money(usd.n) + " / " + money(cad.n, "CAD")) : "") +
+                      (usd.f != null ? tag("Foil: "   + money(usd.f) + " / " + money(cad.f, "CAD")) : "") +
+                      (usd.e != null ? tag("Etched: " + money(usd.e) + " / " + money(cad.e, "CAD")) : "") +
+                    "</div>" +
+                  "</div>"
+                )
+                : ''
+            ) +
+          "</div>" +  
+        "</div>";   
     } catch {}
   }
 
@@ -618,8 +634,14 @@ async function renderSettings(forceFresh = false) {
   if (!settingsForm) return;
   settingsForm.innerHTML = '<div class="mm-field">Loading…</div>';
 
-  const res = await fetch('/api/settings' + (forceFresh ? ('?t=' + Date.now()) : ''));
-  const cur = await res.json();
+const res = await fetch('/api/settings' + (forceFresh ? ('?t=' + Date.now()) : ''));
+let cur = await res.json();
+// If the backend ever returns {__effective, __path}, we only use the flat key-values for the form.
+if (cur && cur.__effective && cur.__path) {
+  // cur already contains the merged {**effective, **saved}, so just keep it.
+  // (extra keys are ignored by the schema)
+}
+
 
   const frag = document.createDocumentFragment();
 
@@ -771,6 +793,9 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
             '<div class="meta"><span>score ' + score.toFixed(2) + "</span>" +
               (it.scry_set ? ('<span>' + String(it.scry_set).toUpperCase() + " " + (it.scry_cn || "") + "</span>") : "") +
               (it.scry_name ? ('<span>→ ' + it.scry_name + "</span>") : "") +
+              (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length
+                ? '<span class="pill warn" title="' + it.review_reasons.join(' • ').replace(/"/g,'&quot;') + '">Review Reason</span>'
+                : "") +
             "</div>" +
           "</div>" +
         "</div>"
@@ -847,6 +872,11 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
           ocrPills.push({ txt: (s.match_ok ? "MATCH " : "REVIEW ") + ms, cls: (s.match_ok ? "ok" : "bad") });
         }
         if (s.flagged) ocrPills.push({ txt: "FLAGGED", cls: "bad" });
+        if (s.flagged && Array.isArray(s.review_reasons) && s.review_reasons.length) {
+          const why = s.review_reasons.join(" • ");
+          ocrPills.push({ txt: "Why?", cls: "warn", title: why });
+        }
+
         if (s.provider) ocrPills.push({ txt: "Provider: " + s.provider, cls: "ok" });
         if (s.last_error) ocrPills.push({ txt: "OCR err: " + s.last_error, cls: "bad" });
         updatePills(ocrEl, ocrPills);

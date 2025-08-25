@@ -23,7 +23,7 @@
             </div>
           </div>
         </div>
-        <div class="row">
+        <div class="row" style="visibility: hidden;">
           <button id="roiReset" title="Use full frame">ROI: Full Frame</button>
           <small id="roiReadout" style="opacity:.8">ROI 0–100%</small>
           <span style="flex:1"></span>
@@ -71,31 +71,38 @@
 
     
     <!-- Card info + history -->
-    <div class="panel info">
+    <!-- Scryfall (top-right) -->
+    <div class="panel info1">
       <h2>Card Info & Prices</h2>
       <div class="content">
-        <div class="scry-half"><div id="cardinfo"></div></div>
-        <div class="review-half">
-          <div class="revhead">
-            <div class="row toolbar">
-              <button id="btnMarkPass" disabled>Mark Pass</button>
-              <button id="btnMarkFail" disabled>Mark Fail</button>
-              <button id="btnEdit" disabled>Edit Card</button>
-              <button id="btnDelete" class="danger" disabled>Delete</button>
-              <div class="row gap">
+        <!-- keep this exactly so ui.js continues to find it -->
+        <div id="cardinfo"></div>
+      </div>
+    </div>
+
+    <!-- History & Review (bottom-right) -->
+    <div class="panel info2">
+      <h2>History & Review</h2>
+      <div class="content">
+        <!-- move everything that was inside your old .review-half here, unchanged -->
+        <!-- example skeleton (use your existing buttons/elements as-is): -->
+        <div class="row toolbar">
+          <button id="btnMarkPass">Pass</button>
+          <button id="btnMarkFail">Fail</button>
+          <button id="btnEdit">Edit</button>
+          <button id="btnDelete" class="danger">Delete</button>
+          
               <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
               <button id="btn-export-txt"  class="btn btn-pill">Export Decklist</button>
               <button id="btn-export-csv" type="button" class="btn btn-pill">Export CSV</button>
-
-            </div>
-            
-            <div class="pill warn" id="revCount">0 items</div>
-            </div>
-          </div>
-          <div id="revList" class="revlist"></div>
+          <div class="spacer"></div>
+          
+          <strong id="revCount">0</strong>
         </div>
+        <div id="revList" class="revlist"></div>
       </div>
     </div>
+
   </div>
 
   <!-- Edit modal -->
@@ -249,46 +256,47 @@
 </div>
 
   <script>
-(function(){
-  var s = document.createElement('script');
-  s.src = "{{ url_for('static', filename='js/ui.js') }}";
-  s.defer = true;
-  s.onerror = function(){
-    var alt = document.createElement('script');
-    alt.src = "/ui.js"; // legacy fallback route
-    alt.defer = true;
-    document.body.appendChild(alt);
-  };
-  document.body.appendChild(s);
-})();
-(function () {
-  function setVer(cur, latest, url, isUpdate) {
-    const chip = document.getElementById('version-chip');
-    const vnum = document.getElementById('vnum');
-    if (!chip || !vnum) return;
+    (function(){
+      
+      var s = document.createElement('script');
+      s.src = "{{ url_for('static', filename='js/ui.js') }}";
+      s.defer = true;
+      s.onerror = function(){
+        var alt = document.createElement('script');
+        alt.src = "/ui.js"; // legacy fallback route
+        alt.defer = true;
+        document.body.appendChild(alt);
+      };
 
-    if (isUpdate && latest && latest !== cur) {
-      chip.style.background = 'rgba(255,185,0,.9)';
-      chip.style.color = '#000';
-      vnum.innerHTML = url
-        ? `v${cur} → <a href="${url}" target="_blank" rel="noopener">v${latest}</a>`
-        : `v${cur} → v${latest}`;
-    } else {
-      vnum.textContent = `v${cur || '0.0.0'}`;
-    }
-  }
+      function setVer(cur, latest, url, isUpdate) {
+        const chip = document.getElementById('version-chip');
+        const vnum = document.getElementById('vnum');
+        if (!chip || !vnum) return;
 
-  function refreshOnce() {
-    fetch('/api/version?ts=' + Date.now(), { cache: 'no-store' })
-      .then(r => r.ok ? r.json() : null)
-      .then(j => j && setVer(j.current, j.latest, j.html_url, j.is_update))
-      .catch(() => setVer('0.0.0'));
-  }
+        if (isUpdate && latest && latest !== cur) {
+          chip.style.background = 'rgba(255,185,0,.9)';
+          chip.style.color = '#000';
+          vnum.innerHTML = url
+            ? `v${cur} → <a href="${url}" target="_blank" rel="noopener">v${latest}</a>`
+            : `v${cur} → v${latest}`;
+        } else {
+          vnum.textContent = `v${cur || '0.0.0'}`;
+        }
+      }
 
-  refreshOnce();
-  // one more pass after 5s in case the async update check finishes later
-  setTimeout(refreshOnce, 5000);
-})();
+      function refreshOnce() {
+        fetch('/api/version?ts=' + Date.now(), { cache: 'no-store' })
+          .then(r => r.ok ? r.json() : null)
+          .then(j => j && setVer(j.current, j.latest, j.html_url, j.is_update))
+          .catch(() => setVer('0.0.0'));
+      }
+
+      
+      document.body.appendChild(s);
+      refreshOnce();
+      setTimeout(refreshOnce, 5000);
+
+    })();
 </script>
 </body>
 </html>

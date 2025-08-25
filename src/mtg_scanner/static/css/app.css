@@ -48,18 +48,18 @@ body {
   grid-template-columns: 1.6fr 1fr 1fr;
   grid-template-rows: 1fr .9fr;
   grid-template-areas:
-    "live crop info"
-    "status cmp info";
+  "live crop info1"
+  "status cmp info2";
 }
 
 @media (max-width: 1200px) {
   .grid {
     grid-template-columns: 1.2fr 1fr;
-    grid-template-rows: 1fr .9fr .9fr .9fr;
+    grid-template-rows: 1fr .9fr .9fr .9fr .9fr;
     grid-template-areas:
-      "live info"
-      "crop info"
-      "cmp info"
+      "live info1"
+      "crop info1"
+      "cmp  info2"
       "status status";
   }
 }
@@ -67,12 +67,13 @@ body {
 @media (max-width: 780px) {
   .grid {
     grid-template-columns: 1fr;
-    grid-template-rows: .9fr .8fr .8fr .9fr;
-    grid-template-areas:
+      grid-template-rows: .9fr .8fr .8fr .7fr .7fr;
+      grid-template-areas:
       "live"
       "crop"
       "cmp"
-      "info";
+      "info1"
+      "info2";
   }
 
   #status { display: none; }
@@ -107,7 +108,8 @@ body {
 
 .main { grid-area: live; }
 .crop { grid-area: crop; }
-.info { grid-area: info; }
+.info1 { grid-area: info1; }
+.info2 { grid-area: info2; }
 .status-panel { grid-area: status; }
 .cmp { grid-area: cmp; }
 
@@ -144,9 +146,18 @@ body {
   line-height: 1.1;
 }
 
-.ok   { background: var(--ok-bg); color: #9be5a8; border-color: #1c4a29; }
-.warn { background: var(--wr-bg); color: #f3d17a; border-color: #4a3a1c; }
-.bad  { background: var(--bd-bg); color: #f4a7a7; border-color: #4a1c1c; }
+.ok   { 
+  background: var(--ok-bg); 
+  color: #9be5a8; 
+  border-color: #1c4a29; }
+.warn { 
+  background: var(--wr-bg); 
+  color: #f3d17a; 
+  border-color: #4a3a1c; }
+.bad  { 
+  background: var(--bd-bg); 
+  color: #f4a7a7; 
+  border-color: #4a1c1c; }
 
 button {
   background: #2a2f3b;
@@ -171,11 +182,55 @@ button.danger {
 
 .cardbox > * { min-width: 0; }
 
-.panel.info > .content {
+.panel.info1 > .content { overflow: auto; }
+
+.cardbox {
   display: grid;
-  grid-template-rows: 1fr 1fr;
-  gap: 12px;
-  overflow: hidden;
+  grid-template-columns: minmax(240px, 1.1fr) 1.4fr;
+  grid-template-areas: "left right";
+  column-gap: 14px;
+  row-gap: 8px;
+}
+
+.cardbox .left  { 
+  grid-area: left;  
+  display: flex; 
+  align-items: flex-start; 
+  justify-content: center; }
+
+.cardbox .right { 
+  grid-area: right; 
+  display: flex; 
+  flex-direction: column; 
+  gap: 10px; 
+  padding-right: 12px; 
+  align-items: flex-start; 
+}
+
+.cardbox .prices-below {
+  margin-top: 10px;
+  align-self: center; 
+  text-align: center;   
+  width: fit-content; 
+  max-width: 100%;
+  padding: 0 6px;  
+}
+
+.cardbox .prices-below .prow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+
+.cardbox .prices-below .phead { margin-bottom: 6px; }
+
+@media (max-width: 1200px) {
+  .cardbox {
+    grid-template-columns: 1fr;
+    grid-template-areas: "left" "right";
+  }
+  .cardbox .right { padding-right: 0; }
 }
 
 .scry-half,
@@ -199,6 +254,11 @@ button.danger {
   flex-direction: column;
   gap: 8px;
   overflow: auto;
+}
+
+.panel.crop #ocr { 
+  padding: var(--pad);     
+  padding-top: 6px;    
 }
 
 .revitem {
@@ -278,7 +338,6 @@ button.danger {
 #roiOverlay .h.se { right: -9px; bottom: -9px; cursor: nwse-resize; }
 #roiOverlay .h.sw { left: -9px; bottom: -9px; cursor: nesw-resize; }
 
-/* ---- Export CSV checklist ---- */
 .mm-checklist {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -303,7 +362,6 @@ button.danger {
   height: 16px;
 }
 
-/* ===== Scryfall card display ===== */
 #cardinfo {
   display: flex;
   flex-direction: column;
@@ -373,10 +431,19 @@ button.danger {
 }
 
 .seticon {
-  width: 22px;
-  height: 22px;
-  opacity: .85;
+  width: 26px;
+  height: 26px;
+  display: inline-block; 
+  padding: 2px;              
+  border-radius: 6px;      
+  background: #9c9c9c;
+  opacity: .95;
+  vertical-align: middle;
+  margin-left: 6px;
+  object-fit: contain;
+  box-shadow: none;
 }
+
 
 .textbox {
   background: linear-gradient(180deg, #141824, #0f121a);
@@ -451,7 +518,6 @@ button.danger {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,.55);
-  /* backdrop-filter: blur(2px);  <-- remove this (causes jank) */
   z-index: 70;
 }
 
@@ -517,12 +583,10 @@ button.danger {
 }
 
 .btn:hover { background: #222834; }
-
 .btn-ghost { background: transparent; }
 .btn-primary { background: #2c7be5; border-color: #2c7be5; color: #fff; }
 .spacer { flex: 1; }
 
-/* ---- Edit Modal (legacy structure) ---- */
 .modal {
   position: fixed;
   inset: 0;
@@ -531,8 +595,6 @@ button.danger {
 }
 
 .modal.show { display: block; }
-
-/* We already use the shared #filter-backdrop, so hide this inner one */
 .modal .backdrop { display: none; }
 
 .modal .card {
@@ -562,7 +624,6 @@ button.danger {
   justify-content: space-between;
 }
 
-/* app.css — console severities */
 .consolebox .sev {
   display: inline-block;
   margin: 0 6px 0 4px;
@@ -580,7 +641,6 @@ button.danger {
 .consolebox .sev-warn  { color: #ffd28c; background: rgba(255,210,140,.14); border-color: rgba(255,210,140,.35); }
 .consolebox .sev-err   { color: #ff9b9b; background: rgba(255,155,155,.14); border-color: rgba(255,155,155,.35); }
 
-/* --- Settings modal form polish --- */
 :root {
   --fg: #E6E8EE;
   --fg-muted: #A7AFBD;
@@ -588,18 +648,16 @@ button.danger {
   --input-bg: #121722;
   --input-border: #263043;
   --input-hover: #2E3A52;
-  --ring: #6D8CFF; /* accent */
+  --ring: #6D8CFF; 
   --radius: 10px;
 }
 
-/* 2–4 responsive columns depending on width */
 .mm-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 16px 24px;
 }
 
-/* label + control stack */
 .mm-field {
   display: flex;
   flex-direction: column;
@@ -612,7 +670,6 @@ button.danger {
   letter-spacing: .2px;
 }
 
-/* inputs + selects share a look */
 .mm-field input,
 .mm-field select {
   width: 100%;
@@ -623,7 +680,7 @@ button.danger {
   border-radius: var(--radius);
   outline: none;
   font-size: 14px;
-  font-variant-numeric: tabular-nums; /* tidy numeric alignment */
+  font-variant-numeric: tabular-nums; 
   box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
   transition:
     border-color .15s ease,
@@ -647,7 +704,6 @@ button.danger {
   opacity: .6;
 }
 
-/* nicer number boxes */
 .mm-field input[type="number"] {
   text-align: right;
   appearance: textfield;
@@ -660,17 +716,14 @@ button.danger {
   margin: 0;
 }
 
-/* ROI 4-pack alignment */
 .mm-field .roi {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
-/* Give the form a bit of bottom padding above the sticky bar */
 #settings-form { padding-bottom: 80px; }
 
-/* ===== Console box ===== */
 .consolebox {
   background: #0f1115;
   border: 1px solid var(--border);
@@ -685,8 +738,7 @@ button.danger {
 .consolebox .t { color: #a9adba; }
 .consolebox .g { color: #7bc1ff; }
 
-/* Keep the whole crop visible, letterboxed if needed */
-.panel.crop .media-wrap { aspect-ratio: 63 / 88; }   /* reserve a card-shaped box */
+.panel.crop .media-wrap { aspect-ratio: 63 / 88; } 
 
 #live,
 #card,
@@ -702,7 +754,6 @@ button.danger {
   .cardbox { grid-template-columns: 1fr; }
 }
 
-/* === Small-screen optimization (≤ ~720×480 landscape) === */
 @media (max-height: 520px) and (min-width: 640px) {
   :root { --gap: 8px; --pad: 8px; --h2fs: 14px; --pillfs: 13px; }
 
@@ -740,7 +791,6 @@ button.danger {
   color: #fff;
 }
 
-/* ===== Make the status console fill remaining space (no overflow) ===== */
 #status { display: flex; flex-direction: column; }
 
 #status > .content { flex: 0 0 auto; }
@@ -766,16 +816,14 @@ button.danger {
   min-height: 0;
 }
 
-/* Padded bars for status/ocr/printer pills */
 .pillbar {
   padding: 8px 12px;
   background: #10141b;
   border: 1px solid var(--border);
   border-radius: 12px;
-  gap: 8px 10px; /* extra spacing between pills */
+  gap: 8px 10px;
 }
 
-/* Padded toolbar for action buttons */
 .toolbar {
   padding: 8px 12px;
   background: #10141b;
@@ -786,13 +834,10 @@ button.danger {
   gap: 10px;
 }
 
-/* rounder “pill” buttons used around the UI (you already use .btn btn-pill) */
 .btn-pill { border-radius: 999px; }
 
-/* tiny breathing room where rows sit inside panels */
 .panel .content > .row { margin-bottom: 4px; }
 
-/* Settings section dividers and headers */
 .mm-section {
   border-top: 1px solid #242b36;
   margin-top: 16px;
@@ -814,7 +859,6 @@ button.danger {
   opacity: .95;
 }
 
-/* Optional: keep headers visible while scrolling the modal body */
 #settings-modal .mm-modal__body { position: relative; }
 
 .mm-section h3.sticky {
@@ -825,3 +869,59 @@ button.danger {
   z-index: 5;
   border-bottom: 1px solid #1e2430;
 }
+
+#editModal .body .row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#editModal .body input {
+  padding: 10px 12px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--fg);
+  border-radius: var(--radius);
+  outline: none;
+  font-size: 14px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+  transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+}
+#editModal .body input:hover  { border-color: var(--input-hover); }
+#editModal .body input:focus  { border-color: var(--ring); box-shadow: 0 0 0 3px rgba(109,140,255,.25); }
+#editModal .body input::placeholder { color: var(--fg-muted); opacity: .7; }
+
+#editModal .body button {
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid #242b36;
+  background: #1a1f27;
+  color: #e5e7eb;
+}
+#editModal .body button:hover { background: #222834; }
+#editModal #eiApply { background: #2c7be5; border-color: #2c7be5; color: #fff; }
+#editModal #eiSearch { background: #1a1f27; } 
+
+#editModal .head .close {
+  width: 32px; height: 32px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 10px; border: 1px solid #242b36;
+  background: #1a1f27; color: #e5e7eb;
+}
+#editModal .head .close:hover { background: #222834; }
+
+.panel.info1 { --info-pad: 14px; }          
+
+.panel.info1 > h2 {
+  padding: 0 var(--info-pad);               
+  margin-bottom: 6px;
+}
+
+.panel.info1 > .content {
+  padding: var(--info-pad);                  
+  overflow: auto;                         
+}
+
+.cardbox .left  { padding-left: 4px; }
+.cardbox .right { padding-right: 8px; }
