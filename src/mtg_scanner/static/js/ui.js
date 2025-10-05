@@ -1118,3 +1118,287 @@ document.getElementById('export-go')?.addEventListener('click', ()=>{
   const sh = document.getElementById("showbad");
   if (sh) sh.onclick = function (e) { e.preventDefault(); fetchBad(); };
 })();
+
+
+document.getElementById('btnMeasureDeck')?.addEventListener('click', async () => {
+  try {
+    const script = `_RAISE_TO_TRAVEL
+SET_START_HEIGHT_OK`;
+    const r = await fetch('/api/printer/gcode', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({script})
+    });
+    const d = await r.json();
+    if (d?.ok) log('t', 'Measuring START height…');
+    else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
+  } catch {}
+});
+
+
+
+document.getElementById('btnMeasureDeck')?.addEventListener('click', async () => {
+  try {
+    const body = { name: 'SET_START_HEIGHT' };
+    const r = await fetch('/api/printer/macro', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d?.ok) log('t', 'Measuring START height…');
+    else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
+  } catch {}
+});
+
+
+
+// ===== Simple macro wiring (override via capture) =====
+(function(){
+  // Helper to send a macro
+  async function sendMacro(name, params) {
+    const body = { name };
+    if (params) body.params = params;
+    const r = await fetch('/api/printer/macro', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    try { return await r.json(); } catch { return null; }
+  }
+
+  // HOME -> SORTER_HOME
+  const homeBtn = document.getElementById('btnHomePrep');
+  if (homeBtn) {
+    homeBtn.addEventListener('click', async (e) => {
+      e.stopImmediatePropagation(); e.preventDefault();
+      const d = await sendMacro('SORTER_HOME');
+      if (d?.ok) log('t', 'SORTER_HOME sent');
+      else log('t', 'Home failed: ' + (d?.error || 'unknown'));
+    }, true); // capture
+  }
+
+  // MEASURE -> SET_START_HEIGHT_OK
+  const measureBtn = document.getElementById('btnMeasureDeck');
+  if (measureBtn) {
+    measureBtn.addEventListener('click', async (e) => {
+      e.stopImmediatePropagation(); e.preventDefault();
+      const d = await sendMacro('SET_START_HEIGHT_OK');
+      if (d?.ok) log('t', 'SET_START_HEIGHT_OK sent');
+      else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
+    }, true); // capture
+  }
+
+  // START -> modal (COUNT only) -> RUN_SORTER_INTERACTIVE
+  const startBtn = document.getElementById('btnStartRun');
+  const startModal = document.getElementById('start-modal');
+  const startClose = document.getElementById('start-close');
+  const startCancel= document.getElementById('start-cancel');
+  const startGo    = document.getElementById('start-go');
+  const startCount = document.getElementById('start-count');
+
+  function openStart() { startModal?.classList.remove('hidden'); }
+  function closeStart() { startModal?.classList.add('hidden'); }
+
+  if (startBtn) startBtn.addEventListener('click', (e)=>{ e.stopImmediatePropagation(); e.preventDefault(); openStart(); }, true);
+  if (startClose) startClose.addEventListener('click', (e)=>{ e.stopImmediatePropagation(); e.preventDefault(); closeStart(); }, true);
+  if (startCancel) startCancel.addEventListener('click', (e)=>{ e.stopImmediatePropagation(); e.preventDefault(); closeStart(); }, true);
+  if (startModal) startModal.addEventListener('click', (e)=>{ if (e.target === startModal){ e.stopImmediatePropagation(); e.preventDefault(); closeStart(); } }, true);
+
+  if (startGo) startGo.addEventListener('click', async (e) => {
+    e.stopImmediatePropagation(); e.preventDefault();
+    const n = Math.max(1, parseInt(startCount?.value || "1", 10));
+    const d = await sendMacro('RUN_SORTER_INTERACTIVE', { COUNT: n });
+    if (d?.ok) log('t', 'RUN_SORTER_INTERACTIVE COUNT=' + n);
+    else log('t', 'Start failed: ' + (d?.error || 'unknown'));
+    closeStart();
+  }, true);
+})();
+
+
+// ===== Printer Controls modal wiring =====
+(function(){
+  const btn       = document.getElementById('btn-open-printer');
+  const modal     = document.getElementById('printer-modal');
+  const close1    = document.getElementById('printer-close');
+  const close2    = document.getElementById('printer-close2');
+  const backdrop  = document.getElementById('filter-backdrop') || document.querySelector('.backdrop');
+
+  function openPrinter(){
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    if (backdrop && backdrop.classList) backdrop.classList.remove('hidden');
+    try { modalOpen = true; } catch {}
+    loadMacros();
+    restorePrefs();
+  }
+  function closePrinter(){
+    if (!modal) return;
+    modal.classList.add('hidden');
+    if (backdrop && backdrop.classList) backdrop.classList.add('hidden');
+    try { modalOpen = false; } catch {}
+  }
+
+  btn && btn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); openPrinter(); }, true);
+  close1 && close1.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); closePrinter(); }, true);
+  close2 && close2.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); closePrinter(); }, true);
+  if (backdrop && !backdrop.id) { backdrop.addEventListener('click', (e)=>{ closePrinter(); }, true); }
+  document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closePrinter(); });
+
+  async function loadMacros(){
+    try {
+      const r = await fetch('/api/printer/macros', {cache:'no-store'});
+      if (!r.ok) return;
+      const d = await r.json();
+      const sel = document.getElementById('macro-list');
+      if (!sel) return;
+      sel.innerHTML='';
+      (d.macros || []).forEach(n => {
+        const opt = document.createElement('option');
+        opt.value = n; opt.textContent = n; sel.appendChild(opt);
+      });
+    } catch {}
+  }
+
+  function setStepActive(val){
+    document.querySelectorAll('#printer-modal .pc-step').forEach(b => {
+      if (b.getAttribute('data-step') === String(val)) b.classList.add('active');
+      else b.classList.remove('active');
+    });
+  }
+  function parseStep(){
+    const active = document.querySelector('#printer-modal .pc-step.active');
+    const v = active ? parseFloat(active.getAttribute('data-step')||'1') : 1;
+    return isFinite(v) ? Math.max(0.01, v) : 1;
+  }
+  document.querySelectorAll('#printer-modal .pc-step').forEach(b => {
+    b.addEventListener('click', (e)=>{
+      e.preventDefault();
+      const v = b.getAttribute('data-step');
+      setStepActive(v);
+      try { localStorage.setItem('pcStep', String(v)); } catch {}
+    });
+  });
+
+  function setSpeedActive(val){
+    document.querySelectorAll('#printer-modal .pc-speed').forEach(b => {
+      if (b.getAttribute('data-speed') === String(val)) b.classList.add('active');
+      else b.classList.remove('active');
+    });
+    const inp = document.getElementById('pc-speed-input');
+    if (inp) inp.value = String(val);
+  }
+  function parseSpeed(){
+    const active = document.querySelector('#printer-modal .pc-speed.active');
+    if (active){
+      const v = parseFloat(active.getAttribute('data-speed')||'6000');
+      return isFinite(v) ? Math.max(1, v) : 6000;
+    }
+    const inp = document.getElementById('pc-speed-input');
+    const v = inp ? parseFloat(inp.value||'6000') : 6000;
+    return isFinite(v) ? Math.max(1, v) : 6000;
+  }
+  document.querySelectorAll('#printer-modal .pc-speed').forEach(b => {
+    b.addEventListener('click', (e)=>{
+      e.preventDefault();
+      const v = b.getAttribute('data-speed');
+      setSpeedActive(v);
+      try { localStorage.setItem('pcSpeed', String(v)); } catch {}
+    });
+  });
+  const speedInput = document.getElementById('pc-speed-input');
+  if (speedInput){
+    speedInput.addEventListener('change', ()=>{
+      document.querySelectorAll('#printer-modal .pc-speed').forEach(b=>b.classList.remove('active'));
+      try { localStorage.setItem('pcSpeed', String(speedInput.value||'6000')); } catch {}
+    });
+  }
+  function restorePrefs(){
+    try { setStepActive(localStorage.getItem('pcStep') || '1'); } catch { setStepActive('1'); }
+    try {
+      const s = localStorage.getItem('pcSpeed');
+      if (s) setSpeedActive(s); else setSpeedActive(6000);
+    } catch { setSpeedActive(6000); }
+  }
+
+  async function jog(dx,dy,dz){
+    try {
+      const body = {};
+      if (typeof dx === 'number') body.x = dx;
+      if (typeof dy === 'number') body.y = dy;
+      if (typeof dz === 'number') body.z = dz;
+      body.f = parseSpeed();
+      const r = await fetch('/api/printer/move', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+      });
+      const d = await r.json().catch(()=>null);
+      if (!d || !d.ok) { try { log('t', 'Jog failed: ' + (d && d.error || 'unknown')); } catch {} }
+    } catch {}
+  }
+  document.querySelectorAll('#printer-modal [data-jog]').forEach(el => {
+    el.addEventListener('click', (e)=>{
+      e.preventDefault(); e.stopImmediatePropagation();
+      const step = parseStep();
+      const spec = (el.getAttribute('data-jog')||'').toLowerCase();
+      const m = spec.match(/([xyz]):([+-]?\d+(?:\.\d+)?)/);
+      if (!m) return;
+      const axis = m[1], dir = parseFloat(m[2]) || 0;
+      const dx = axis==='x' ? dir*step : undefined;
+      const dy = axis==='y' ? dir*step : undefined;
+      const dz = axis==='z' ? dir*step : undefined;
+      jog(dx,dy,dz);
+    });
+  });
+
+  async function home(axes){
+    try {
+      const r = await fetch('/api/printer/home', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({axes, safe:true})});
+      const d = await r.json().catch(()=>null);
+      if (d && d.ok) { try { log('t', 'Homing ' + axes); } catch {} }
+      else { try { log('t', 'Home failed: ' + (d && d.error || 'unknown')); } catch {} }
+    } catch {}
+  }
+  document.getElementById('home-all')?.addEventListener('click', (e)=>{ e.preventDefault(); home('XYZ'); });
+  document.getElementById('home-xy')?.addEventListener('click', (e)=>{ e.preventDefault(); home('XY'); });
+  document.getElementById('home-x')?.addEventListener('click', (e)=>{ e.preventDefault(); home('X'); });
+  document.getElementById('home-y')?.addEventListener('click', (e)=>{ e.preventDefault(); home('Y'); });
+  document.getElementById('home-z')?.addEventListener('click', (e)=>{ e.preventDefault(); home('Z'); });
+
+  document.getElementById('macro-run')?.addEventListener('click', async (e)=>{
+    e.preventDefault(); e.stopImmediatePropagation();
+    const sel = document.getElementById('macro-list');
+    const paramsLine = (document.getElementById('macro-params')||{}).value || '';
+    const name = sel && sel.value;
+    if (!name) return;
+    const params = {};
+    (paramsLine.trim().split(/\s+/).filter(Boolean)).forEach(tok => {
+      const i = tok.indexOf('=');
+      if (i>0){
+        const k = tok.slice(0,i).trim();
+        let v = tok.slice(i+1).trim();
+        if (/^-?\d+(?:\.\d+)?$/.test(v)) v = Number(v);
+        params[k] = v;
+      }
+    });
+    const body = Object.keys(params).length ? {name, params} : {name};
+    try {
+      const r = await fetch('/api/printer/macro', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const d = await r.json().catch(()=>null);
+      if (d && d.ok) { try { log('t', 'Macro sent: ' + (d.cmd || name)); } catch {} }
+      else { try { log('t', 'Macro failed: ' + (d && d.error || 'unknown')); } catch {} }
+    } catch {}
+  });
+
+  document.getElementById('gcode-send')?.addEventListener('click', async (e)=>{
+    e.preventDefault(); e.stopImmediatePropagation();
+    const line = (document.getElementById('gcode-line')||{}).value || '';
+    if (!line.trim()) return;
+    try {
+      const r = await fetch('/api/printer/gcode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({script: line})});
+      const d = await r.json().catch(()=>null);
+      if (d && d.ok) { try { log('t', 'G-code sent: ' + line); } catch {} }
+      else { try { log('t', 'G-code failed: ' + (d && d.error || 'unknown')); } catch {} }
+    } catch {}
+  });
+
+  async function doEstop(){ try { await fetch('/api/printer/estop', {method:'POST'}); try { log('t','EMERGENCY STOP sent'); } catch {} } catch {} }
+  document.getElementById('printer-estop')?.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); doEstop(); });
+  if (!window.estop) { window.estop = doEstop; }
+})();
+

@@ -4,9 +4,7 @@
   <meta charset="utf-8">
   <title>MTG Scanner</title>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  
   <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
-  
 </head>
 <body>
   <div class="grid">
@@ -17,7 +15,6 @@
         <div class="media-wrap">
           <div id="liveWrap" style="position:relative;width:100%;height:100%;">
             <img id="live" src="/live" alt="Live stream">
-            <!-- ROI overlay -->
             <div id="roiOverlay" aria-label="Detection area">
               <div class="h nw"></div><div class="h ne"></div><div class="h se"></div><div class="h sw"></div>
             </div>
@@ -40,12 +37,10 @@
       </div>
     </div>
 
-    <!-- Comparison -->
-    <div class="panel cmp">
-      <h2>Comparison</h2>
-      <div class="content">
-        <div class="media-wrap"><img id="cmpimg" src="/compare.jpg" alt="Comparison"></div>
-      </div>
+    <!-- Card Info -->
+    <div class="panel info1">
+      <h2>Card Info & Prices</h2>
+      <div class="content"><div id="cardinfo"></div></div>
     </div>
 
     <!-- Status -->
@@ -54,55 +49,58 @@
       <div class="content" style="gap:12px">
         <div id="scanner" class="row pillbar"></div>
         <div id="printer1" class="row pillbar"></div>
-
-
       </div>
 
-      <!-- Console (fills the rest of the panel, scrolls internally) -->
+      <!-- Console -->
       <div class="console-wrap">
         <pre id="consoleBox" class="consolebox" aria-live="polite"></pre>
-          <div class="row toolbar">
-            <button id="btnLogClear">Clear Console</button>
-            <button id="btn-open-settings" class="btn btn-pill">App Settings</button>
-          </div>
+        <div class="row toolbar">
+          <button id="btnLogClear">Clear Console</button>
+          <button id="btn-open-settings" class="btn btn-pill">App Settings</button>
+        </div>
       </div>
-
     </div>
 
-    
-    <!-- Card info + history -->
-    <!-- Scryfall (top-right) -->
-    <div class="panel info1">
-      <h2>Card Info & Prices</h2>
+    <!-- Comparison (now with Printer Controls in the same box) -->
+    <div class="panel cmp">
       <div class="content">
-        <!-- keep this exactly so ui.js continues to find it -->
-        <div id="cardinfo"></div>
+        <!-- Printer controls bar -->
+        <div class="prn-mainbar toolbar" id="cmp-printer-controls">
+          <button id="btnHomePrep" class="btn btn-pill">1. Home</button>
+          <button id="btnMeasureDeck" class="btn btn-pill">2. Measure Deck</button>
+          <button id="btnStartRun" class="btn btn-pill btn-primary">3. Start…</button>
+          <button id="btn-open-printer" class="btn btn-pill">Printer Controls…</button>
+          <button class="btn-estop" onclick="estop()">EMERGENCY STOP</button>
+          <div class="spacer"></div>
+          <!-- (Keep E-STOP in Status for always-on access) -->
+        </div>
+      <h2>Comparison</h2>
+        <div class="media-wrap"><img id="cmpimg" src="/compare.jpg" alt="Comparison"></div>
       </div>
     </div>
 
-    <!-- History & Review (bottom-right) -->
+    <!-- History & Review -->
     <div class="panel info2">
       <h2>History & Review</h2>
       <div class="content">
-        <!-- move everything that was inside your old .review-half here, unchanged -->
-        <!-- example skeleton (use your existing buttons/elements as-is): -->
         <div class="row toolbar">
           <button id="btnMarkPass">Pass</button>
           <button id="btnMarkFail">Fail</button>
           <button id="btnEdit">Edit</button>
           <button id="btnDelete" class="danger">Delete</button>
-          
-              <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
-              <button id="btn-export-txt"  class="btn btn-pill">Export Decklist</button>
-              <button id="btn-export-csv" type="button" class="btn btn-pill">Export CSV</button>
+          <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
+          <button id="btn-export-txt"  class="btn btn-pill">Export Decklist</button>
+          <button id="btn-export-csv"  class="btn btn-pill">Export CSV</button>
           <div class="spacer"></div>
-          
           <strong id="revCount">0</strong>
         </div>
         <div id="revList" class="revlist"></div>
       </div>
     </div>
-
+    <div id="version-chip" class="version-chip">
+    <span class="label">Version:</span>
+    <span id="vnum">…</span>
+  </div>
   </div>
 
   <!-- Edit modal -->
@@ -125,145 +123,212 @@
       </div>
     </div>
   </div>
-<!-- Filter Modal -->
-<div id="filter-backdrop" class="mm-backdrop hidden"></div>
-<div id="filter-modal" class="mm-modal hidden">
-  <div class="mm-modal__header">
-    <div class="mm-title">Filter History</div>
-    <button class="btn btn-pill btn-ghost" id="filter-close">✕</button>
-  </div>
 
-  <div class="mm-modal__body">
-    <div class="mm-grid">
-      <label class="mm-field">
-        <span>Status</span>
+  <!-- Filter Modal -->
+  <div id="filter-backdrop" class="mm-backdrop hidden"></div>
+  <div id="filter-modal" class="mm-modal hidden">
+    <div class="mm-modal__header">
+      <div class="mm-title">Filter History</div>
+      <button class="btn btn-pill btn-ghost" id="filter-close">✕</button>
+    </div>
+    <div class="mm-modal__body">
+      <div class="mm-grid">
+        <label class="mm-field">
+          <span>Status</span>
           <select id="hf-status" class="mm-input">
             <option value="all" selected>All</option>
             <option value="pass">Pass</option>
             <option value="fail">Fail</option>
             <option value="flagged">Flagged</option>
           </select>
-      </label>
-
-      <label class="mm-field">
-        <span>Score ≥</span>
-        <input id="hf-scoremin" type="number" step="0.01" min="0" max="1" value="0.00" class="mm-input">
-      </label>
-
-      <label class="mm-field">
-        <span>Since</span>
-        <select id="hf-since" class="mm-input">
-          <option value="">Any time</option>
-          <option value="1h">Last hour</option>
-          <option value="24h" selected>Last 24h</option>
-          <option value="7d">Last 7 days</option>
-        </select>
-      </label>
-
-      <label class="mm-field">
-        <span>Text</span>
-        <input id="hf-q" type="text" placeholder="name contains…" class="mm-input">
-      </label>
-
-      <label class="mm-field">
-        <span>Set</span>
-        <input id="hf-set" type="text" placeholder="ltr, mom…" class="mm-input">
-      </label>
-
-      <label class="mm-field">
-        <span>Foil</span>
-        <select id="hf-foil" class="mm-input">
-          <option value="">Any</option>
-          <option value="true">Foil</option>
-          <option value="false">Non-foil</option>
-        </select>
-      </label>
-
-      <label class="mm-field">
-        <span>Sort</span>
-        <div class="mm-row">
-          <select id="hf-sortby" class="mm-input">
-            <option value="ts" selected>Time</option>
-            <option value="score">Score</option>
-            <option value="name">Name</option>
-            <option value="set">Set</option>
+        </label>
+        <label class="mm-field">
+          <span>Score ≥</span>
+          <input id="hf-scoremin" type="number" step="0.01" min="0" max="1" value="0.00" class="mm-input">
+        </label>
+        <label class="mm-field">
+          <span>Since</span>
+          <select id="hf-since" class="mm-input">
+            <option value="">Any time</option>
+            <option value="1h">Last hour</option>
+            <option value="24h" selected>Last 24h</option>
+            <option value="7d">Last 7 days</option>
           </select>
-          <select id="hf-sortdir" class="mm-input">
-            <option value="desc" selected>Desc</option>
-            <option value="asc">Asc</option>
+        </label>
+        <label class="mm-field">
+          <span>Text</span>
+          <input id="hf-q" type="text" placeholder="name contains…" class="mm-input">
+        </label>
+        <label class="mm-field">
+          <span>Set</span>
+          <input id="hf-set" type="text" placeholder="ltr, mom…" class="mm-input">
+        </label>
+        <label class="mm-field">
+          <span>Foil</span>
+          <select id="hf-foil" class="mm-input">
+            <option value="">Any</option>
+            <option value="true">Foil</option>
+            <option value="false">Non-foil</option>
           </select>
-        </div>
-      </label>
+        </label>
+        <label class="mm-field">
+          <span>Sort</span>
+          <div class="mm-row">
+            <select id="hf-sortby" class="mm-input">
+              <option value="ts" selected>Time</option>
+              <option value="score">Score</option>
+              <option value="name">Name</option>
+              <option value="set">Set</option>
+            </select>
+            <select id="hf-sortdir" class="mm-input">
+              <option value="desc" selected>Desc</option>
+              <option value="asc">Asc</option>
+            </select>
+          </div>
+        </label>
+      </div>
+    </div>
+    <div class="mm-modal__footer">
+      <button id="hf-reset" class="btn btn-pill btn-ghost">Reset</button>
+      <div class="spacer"></div>
+      <button id="hf-apply" class="btn btn-pill btn-primary">Apply Filters</button>
     </div>
   </div>
 
-  <div class="mm-modal__footer">
-    <button id="hf-reset" class="btn btn-pill btn-ghost">Reset</button>
-    <div class="spacer"></div>
-    <button id="hf-apply" class="btn btn-pill btn-primary">Apply Filters</button>
+  <!-- Export CSV Modal -->
+  <div id="export-modal" class="mm-modal hidden" aria-hidden="true">
+    <div class="mm-modal__header">
+      <div class="mm-title">Export CSV</div>
+      <button class="btn btn-pill btn-ghost" id="export-close">✕</button>
+    </div>
+    <div class="mm-modal__body">
+      <p class="muted" style="margin:.25rem 0 .75rem 0;">
+        Choose columns to include. This exports the <b>currently filtered</b> results.
+      </p>
+      <div id="export-field-list" class="mm-checklist"></div>
+    </div>
+    <div class="mm-modal__footer">
+      <button id="export-selectall" class="btn btn-pill btn-ghost">Select all</button>
+      <button id="export-clear"      class="btn btn-pill btn-ghost">Clear</button>
+      <button id="export-defaults"   class="btn btn-pill btn-ghost">Archidekt defaults</button>
+      <div class="spacer"></div>
+      <button id="export-go" class="btn btn-pill btn-primary">Export CSV</button>
+    </div>
   </div>
-</div>
-<!-- Export CSV Modal -->
-<div id="export-modal" class="mm-modal hidden" aria-hidden="true">
+
+  <!-- Settings Modal -->
+  <div id="settings-backdrop" class="mm-backdrop hidden"></div>
+  <div id="settings-modal" class="mm-modal hidden" style="max-width:900px;">
+    <div class="mm-modal__header">
+      <div class="mm-title">Scanner Settings</div>
+      <button class="btn btn-pill btn-ghost" id="settings-close">✕</button>
+    </div>
+    <div id="settings-note" style="margin-top:10px; text-align: center; font-size:12px; opacity:.8;">
+      Changes are saved to <code>settings.json</code>. Restart the app to ensure changes are applied.
+    </div>
+    <div class="mm-modal__body" style="max-height:70vh; overflow:auto;">
+      <div id="settings-tabs" class="row" style="flex-wrap:wrap; gap:6px; margin-bottom:10px;"></div>
+      <form id="settings-form"></form>
+    </div>
+    <div class="mm-modal__footer">
+      <button id="settings-reset" class="btn btn-pill btn-ghost">Restore Defaults</button>
+      <div class="spacer"></div>
+      <button id="settings-save"  class="btn btn-pill btn-primary">Save</button>
+    </div>
+  </div>
+
+  <!-- Start Run modal -->
+  <div id="start-modal" class="mm-modal hidden" aria-hidden="true" style="max-width:420px;">
+    <div class="mm-modal__header">
+      <div class="mm-title">Start Run</div>
+      <button class="btn btn-pill btn-ghost" id="start-close">✕</button>
+    </div>
+    <div class="mm-modal__body">
+      <div class="mm-grid">
+        <label class="mm-field">
+          <span>How many cards?</span>
+          <input id="start-count" type="number" min="1" step="1" value="1" class="mm-input">
+        </label>
+      </div>
+      <p class="muted" style="margin-top:.5rem;">Runs <code>RUN_SORTER_INTERACTIVE</code> for the given count.</p>
+    </div>
+    <div class="mm-modal__footer">
+      <button class="btn btn-pill btn-ghost" id="start-cancel">Cancel</button>
+      <div class="spacer"></div>
+      <button class="btn btn-pill btn-primary" id="start-go">Start</button>
+    </div>
+  </div>
+
+  
+<!-- Printer Controls Modal -->
+<div id="printer-modal" class="mm-modal hidden" aria-hidden="true" style="max-width:740px;">
   <div class="mm-modal__header">
-    <div class="mm-title">Export CSV</div>
-    <button class="btn btn-pill btn-ghost" id="export-close">✕</button>
+    <div class="mm-title">Printer Controls</div>
+    <button class="btn btn-pill btn-ghost" id="printer-close">✕</button>
   </div>
   <div class="mm-modal__body">
-    <p class="muted" style="margin:.25rem 0 .75rem 0;">
-      Choose columns to include. This exports the <b>currently filtered</b> results.
-    </p>
-    <div id="export-field-list" class="mm-checklist"></div>
-  </div>
-  <div class="mm-modal__footer">
-    <button id="export-selectall" class="btn btn-pill btn-ghost">Select all</button>
-    <button id="export-clear"      class="btn btn-pill btn-ghost">Clear</button>
-    <button id="export-defaults"   class="btn btn-pill btn-ghost">Archidekt defaults</button>
-    <div class="spacer"></div>
-    <button id="export-go" class="btn btn-pill btn-primary">Export CSV</button>
-  </div>
-</div>
-
-<!-- Settings Modal -->
-<div id="settings-backdrop" class="mm-backdrop hidden"></div>
-<div id="settings-modal" class="mm-modal hidden" style="max-width:900px;">
-  <div class="mm-modal__header">
-    <div class="mm-title">Scanner Settings</div>
-    <button class="btn btn-pill btn-ghost" id="settings-close">✕</button>
-  </div>
-
-  <div class="mm-modal__body" style="max-height:70vh; overflow:auto;">
-    <!-- Tabs / categories -->
-    <div id="settings-tabs" class="row" style="flex-wrap:wrap; gap:6px; margin-bottom:10px;"></div>
-
-    <!-- Dynamic form goes here -->
-    <form id="settings-form"></form>
-
-    <div id="settings-note" style="margin-top:10px; font-size:12px; opacity:.8;">
-      Changes are saved to <code>settings.json</code>. Some options apply immediately; others take effect next restart.
+    
+<div class="mm-section">
+  <h3>Jog</h3>
+  <div class="pc-wrap">
+    <div class="pc-pad">
+      <button class="btn btn-pill pc-arrow" data-jog="y:+1" aria-label="Y+">↑</button>
+      <div class="pc-middle">
+        <button class="btn btn-pill pc-arrow" data-jog="x:-1" aria-label="X-">←</button>
+        <button class="btn btn-pill pc-homexy" id="home-xy" aria-label="Home XY">🏠</button>
+        <button class="btn btn-pill pc-arrow" data-jog="x:+1" aria-label="X+">→</button>
+      </div>
+      <button class="btn btn-pill pc-arrow" data-jog="y:-1" aria-label="Y-">↓</button>
+    </div>
+    <div class="pc-right">
+      <div class="pc-zcol">
+        <button class="btn btn-pill pc-z" data-jog="z:+1" aria-label="Z+">Z+</button>
+        <button class="btn btn-pill pc-z" data-jog="z:-1" aria-label="Z-">Z-</button>
+      </div>
+      <div class="pc-home-col">
+        <button class="btn btn-pill" id="home-all">Home ALL</button>
+        <button class="btn btn-pill" id="home-x">Home X</button>
+        <button class="btn btn-pill" id="home-y">Home Y</button>
+        <button class="btn btn-pill" id="home-z">Home Z</button>
+      </div>
     </div>
   </div>
-
-  <div class="mm-modal__footer">
-    <button id="settings-reset" class="btn btn-pill btn-ghost">Restore Defaults</button>
-    <div class="spacer"></div>
-    <button id="settings-save"  class="btn btn-pill btn-primary">Save</button>
+  <div class="pc-steps" role="group" aria-label="Step size">
+    <button class="pc-step" data-step="0.1">0.1</button>
+    <button class="pc-step active" data-step="1">1</button>
+    <button class="pc-step" data-step="10">10</button>
+    <button class="pc-step" data-step="25">25</button>
+    <button class="pc-step" data-step="50">50</button>
+    <button class="pc-step" data-step="100">100</button>
+  </div>
+  <div class="pc-speed-wrap" role="group" aria-label="Speed (mm/min)">
+    <span class="pc-label">Speed</span>
+    <div class="pc-speed-chips">
+      <button class="pc-speed" data-speed="600">600</button>
+      <button class="pc-speed" data-speed="1200">1200</button>
+      <button class="pc-speed" data-speed="3000">3000</button>
+      <button class="pc-speed active" data-speed="6000">6000</button>
+      <button class="pc-speed" data-speed="9000">9000</button>
+    </div>
+    <input id="pc-speed-input" type="number" class="mm-input pc-speed-input" value="6000" step="1" min="1" aria-label="Speed input (mm/min)">
   </div>
 </div>
-<div id="version-chip" class="version-chip">
-  <span class="label">Version:</span>
-  <span id="vnum">…</span>
+<div class="mm-section">
+  <div class="mm-modal__footer">
+    <div class="spacer"></div>
+    <button id="printer-estop" class="btn-estop">!!! EMERGENCY STOP !!!</button>
+  </div>
 </div>
+
 
   <script>
     (function(){
-      
       var s = document.createElement('script');
       s.src = "{{ url_for('static', filename='js/ui.js') }}";
       s.defer = true;
       s.onerror = function(){
         var alt = document.createElement('script');
-        alt.src = "/ui.js"; // legacy fallback route
+        alt.src = "/ui.js";
         alt.defer = true;
         document.body.appendChild(alt);
       };
@@ -272,7 +337,6 @@
         const chip = document.getElementById('version-chip');
         const vnum = document.getElementById('vnum');
         if (!chip || !vnum) return;
-
         if (isUpdate && latest && latest !== cur) {
           chip.style.background = 'rgba(255,185,0,.9)';
           chip.style.color = '#000';
@@ -291,12 +355,10 @@
           .catch(() => setVer('0.0.0'));
       }
 
-      
       document.body.appendChild(s);
       refreshOnce();
       setTimeout(refreshOnce, 5000);
-
     })();
-</script>
+  </script>
 </body>
 </html>

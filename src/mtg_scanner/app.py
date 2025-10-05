@@ -947,9 +947,18 @@ def _read_lines_for_title(roi_src_bgr, blacklist_re=None, band_name="", foil=Fal
 #MARK: Collector number helpers / OCR
 # =========================
 def _normalize_num_chars(txt: str) -> str:
-    return (txt or "").translate(str.maketrans({
-        'O':'0','o':'0','丨':'1','|':'1','I':'1','l':'1','¹':'1','€':'0'
-    }))
+    # Map common OCR lookalikes to digits; use \u escapes to avoid mojibake
+    return (txt or "").translate({
+        ord('O'): '0',
+        ord('o'): '0',
+        ord('|'): '1',
+        ord('I'): '1',
+        ord('l'): '1',
+        ord('\u4E28'): '1',  # 丨 (vertical stroke) — was shown as "ä¸¨"
+        ord('\u00B9'): '1',  # ¹ (superscript one) — was shown as "Â¹"
+        ord('\u20AC'): '0',  # € (Euro) sometimes mis-OCRs as zero
+    })
+
 
 def _collapse_numeric_spans(txt: str):
     t = _normalize_num_chars(txt)
@@ -2249,9 +2258,14 @@ def cardinfo_worker():
 # =========================
 #MARK: MOONRAKER WS + AUTOSCAN
 # =========================
-def _send_gcode(script):
+
+def _send_gcode(script, timeout=None):
+    # Use a longer timeout for long-running moves/homing/macros; Moonraker blocks until completion.
     try:
-        _HTTP.post(HTTP_POST_URL, json={"script": script}, timeout=5)
+        s = (script or "").strip().upper()
+        long = s.startswith(("G28", "RUN_SORTER_INTERACTIVE", "SORTER_HOME", "SORTER_CYCLE_INTERACTIVE", "MOVE_TO_SCAN", "PICKUP_CARD"))
+        to = timeout if timeout is not None else (120 if long else 30)
+        _HTTP.post(HTTP_POST_URL, json={"script": script}, timeout=to)
     except Exception as e:
         _dbg("WEBSOCKET ERROR", f"gcode post failed: {e}")
 
@@ -2764,7 +2778,23 @@ def api_set_detect_roi():
     with _detect_roi_lock:
         DETECT_ROI[:] = [x0, y0, x1, y1]
         global _detect_roi_version
-        _detect_roi_version += 1  # tell video thread to drop old tracks immediately
+        _detect_roi_version += 1 
+    try:
+        cur = _settings_load()
+    except Exception:
+        cur = {}
+    try:
+        if not isinstance(cur, dict):
+            cur = {}
+        cur["DETECT_ROI"] = [x0, y0, x1, y1]
+        try:
+            _settings_save(cur)
+        except Exception:
+            # fallback to legacy helper if present
+            save_settings_file(cur)
+    except Exception as e:
+        _dbg("SETTINGS ERROR", f"save DETECT_ROI failed: {e}")
+
     return jsonify({"ok": True, "roi": list(DETECT_ROI)})
 
 
@@ -3858,20 +3888,31 @@ def _start_workers():
         os.makedirs(EXPORT_DIR, exist_ok=True)
     except Exception as e:
         _dbg("EXPORT ERROR", f"mkdirs failed: {e}")
-    # Load persisted review history
     global scan_history
     try:
         scan_history = _load_history_from_disk()
         _dbg("HISTORY", f"Loaded {len(scan_history)} scans.")
     except Exception as e:
         _dbg("HISTORY ERROR", f"load failed: {e}")
-
-    # Load badlist
     try:
         for itm in _badlist_load_from_disk():
             bad_cards.append(itm)
     except Exception as e:
         _dbg("HISTORY ERROR", f"load failed: {e}")
+    try:
+        _cur = _settings_load()
+    except Exception:
+        _cur = {}
+    try:
+        _roi = (_cur or {}).get("DETECT_ROI")
+        if isinstance(_roi, (list, tuple)) and len(_roi) == 4:
+            x0, y0, x1, y1 = [float(x) for x in _roi]
+            x0, x1 = sorted((max(0.0, min(1.0, x0)), max(0.0, min(1.0, x1))))
+            y0, y1 = sorted((max(0.0, min(1.0, y0)), max(0.0, min(1.0, y1))))
+            with _detect_roi_lock:
+                DETECT_ROI[:] = [x0, y0, x1, y1]
+    except Exception as e:
+        _dbg("SETTINGS ERROR", f"apply DETECT_ROI failed: {e}")
 
     # Warm catalogs in the background
     threading.Thread(target=_load_scryfall_catalogs_bg, daemon=True).start()
@@ -3915,6 +3956,188 @@ def api_version():
     return jsonify(info)
 
 
+
+
+
+# ---------------------------
+# Printer Controls (Moonraker/Klipper)
+
+# Compatibility wrapper: normalize _send_gcode() to (ok, err)
+def _send_gcode_result(script: str):
+    """
+    Calls the app's legacy _send_gcode() (which doesn't return anything)
+    and converts it to (ok, err). If unavailable, posts directly to HTTP_POST_URL.
+    """
+    try:
+        # prefer app's original sender
+        if "_send_gcode" in globals() and callable(_send_gcode):
+            try:
+                _send_gcode(script)  # legacy returns None
+                return True, None
+            except Exception as e:
+                return False, str(e)
+        # fallback: direct HTTP
+        url = (HTTP_POST_URL if "HTTP_POST_URL" in globals() else "").strip()
+        if not url:
+            return False, "HTTP_POST_URL not configured"
+        to = globals().get("HTTP_TIMEOUT", 5)
+        r = _HTTP.post(url, json={"script": script}, timeout=to)
+        ok = (r.status_code == 200)
+        return (ok, None if ok else f"HTTP {r.status_code}")
+    except Exception as e:
+        return False, str(e)
+# ---------------------------
+
+def _moonraker_http_base():
+    """Translate ws(s)://host/websocket -> http(s)://host"""
+    try:
+        url = MOONRAKER_URL or ""
+    except NameError:
+        url = ""
+    if not url:
+        return None
+    u = url.replace("ws://","http://").replace("wss://","https://")
+    if "/websocket" in u:
+        u = u.split("/websocket",1)[0]
+    return u.rstrip("/")
+
+def _mr_get(path):
+    base = _moonraker_http_base()
+    if not base:
+        return None, "Moonraker URL not configured"
+    try:
+        r = _HTTP.get(base + path, timeout=globals().get('HTTP_TIMEOUT', 5))
+        return r, None
+    except Exception as e:
+        return None, str(e)
+
+def _mr_post(path, payload=None):
+    base = _moonraker_http_base()
+    if not base:
+        return None, "Moonraker URL not configured"
+    try:
+        if payload is None:
+            payload = {}
+        r = _HTTP.post(base + path, json=payload, timeout=globals().get('HTTP_TIMEOUT', 5))
+        return r, None
+    except Exception as e:
+        return None, str(e)
+
+def _list_macros_from_config():
+    """Query Moonraker's configfile object and extract [gcode_macro *] section names."""
+    try:
+        r, err = _mr_get("/printer/objects/query?configfile")
+        if err or r is None or r.status_code != 200:
+            raise RuntimeError(err or f"HTTP {getattr(r,'status_code',None)}")
+        j = r.json() or {}
+        cfg = ((j.get("result") or {}).get("status") or {}).get("configfile") or {}
+        conf = cfg.get("config") or {}
+        names = []
+        for sec in conf.keys():
+            if isinstance(sec, str) and sec.lower().startswith("gcode_macro "):
+                nm = sec.split(" ",1)[1].strip()
+                if nm and nm.upper() != "M112":  # skip reserved
+                    names.append(nm)
+        names.sort()
+        return names
+    except Exception as e:
+        _dbg("MACROS", f"Falling back to static list: {e}")
+        # Fallback: a reasonable fixed list based on your posted config
+        return [
+            "SORTER_HELP","SORT_ONE","SORT_10","SET_TIMEOUT_S","CANCEL_SCAN_WAIT",
+            "SORTER_HOME","SET_START_HEIGHT_GUIDED","SET_START_HEIGHT_OK","SET_CARD_THICKNESS",
+            "INIT_STACKS","SET_START_FROM_CURRENT","VAC_ON","VAC_OFF","VAC_ZERO",
+            "MOVE_TO_SCAN","PLACE_FINISHED","PLACE_REJECT","SCAN_OK","SCAN_FAIL",
+            "SORTER_CYCLE_INTERACTIVE","RUN_SORTER_INTERACTIVE","SHOW_STACKS","SET_SCAN_PARK",
+        ]
+
+@app.get("/api/printer/macros")
+def api_printer_macros():
+    try:
+        names = _list_macros_from_config()
+        return jsonify({"macros": names})
+    except Exception as e:
+        return jsonify({"macros": [], "error": str(e)}), 500
+
+@app.post("/api/printer/gcode")
+def api_printer_gcode():
+    j = request.get_json(force=True, silent=True) or {}
+    script = (j.get("script") or "").strip()
+    if not script:
+        return jsonify({"ok": False, "error": "Missing 'script'"}), 400
+    ok, err = _send_gcode_result(script)
+    return jsonify({"ok": ok, "error": err})
+
+@app.post("/api/printer/macro")
+def api_printer_macro():
+    j = request.get_json(force=True, silent=True) or {}
+    name = (j.get("name") or "").strip()
+    params = j.get("params")
+    args = j.get("args")
+    if not name:
+        return jsonify({"ok": False, "error": "Missing 'name'"}), 400
+    # Build command line
+    line = name
+    if isinstance(params, dict) and params:
+        parts = []
+        for k, v in params.items():
+            if v is None: continue
+            parts.append(f"{k}={v}")
+        if parts:
+            line += " " + " ".join(parts)
+    elif isinstance(args, str) and args.strip():
+        line += " " + args.strip()
+    ok, err = _send_gcode_result(line)
+    return jsonify({"ok": ok, "cmd": line, "error": err})
+
+@app.post("/api/printer/home")
+def api_printer_home():
+    j = request.get_json(force=True, silent=True) or {}
+    axes = (j.get("axes") or "XYZ").upper()
+    safe = bool(j.get("safe", True))
+    # sanitize axes
+    axes = "".join([a for a in axes if a in "XYZ"])
+    if not axes:
+        axes = "XYZ"
+    cmd = "G28 " + " ".join(list(axes))
+    ok, err = _send_gcode_result(cmd)
+    if ok and safe:
+        _send_gcode("_SAFE_RAISE")
+    return jsonify({"ok": ok, "error": err, "cmd": cmd})
+
+@app.post("/api/printer/move")
+def api_printer_move():
+    j = request.get_json(force=True, silent=True) or {}
+    x = j.get("x"); y = j.get("y"); z = j.get("z")
+    f = j.get("f") or j.get("feedrate") or 6000
+    absolute = bool(j.get("absolute", False))
+    axes = []
+    if isinstance(x, (int, float)): axes.append(f"X{float(x):.3f}")
+    if isinstance(y, (int, float)): axes.append(f"Y{float(y):.3f}")
+    if isinstance(z, (int, float)): axes.append(f"Z{float(z):.3f}")
+    if not axes:
+        return jsonify({"ok": False, "error": "No movement specified"}), 400
+    cmds = []
+    if not absolute:
+        cmds.append("G91")
+    cmds.append("G1 " + " ".join(axes) + f" F{int(f)}")
+    if not absolute:
+        cmds.append("G90")
+    ok_all = True; last_err = None
+    for c in cmds:
+        ok, err = _send_gcode_result(c)
+        if not ok:
+            ok_all = False; last_err = err; break
+    return jsonify({"ok": ok_all, "error": last_err, "cmds": cmds})
+
+@app.post("/api/printer/estop")
+def api_printer_estop():
+    # Try Moonraker endpoint if present; always send M112 as well.
+    _mr_post("/printer/emergency_stop", {})
+    ok, err = _send_gcode_result("M112")
+    return jsonify({"ok": ok, "error": err})
+
+
 # ---------------------------
 # Graceful shutdown (fixed)
 # ---------------------------
@@ -3952,7 +4175,7 @@ def run_server(host: str, port: int):
     _start_workers()
     httpd = make_server(host, port, app, threaded=True, request_handler=WSGIRequestHandler)
     _httpd_ref["srv"] = httpd
-    print(f"Serving on http://{host}:{port}")
+    _dbg("WEB SERVER", f"Serving on http://{host}:{port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -3979,4 +4202,3 @@ if __name__ == "__main__":
     except Exception:
         pass
     run_server(HOST, PORT)
-

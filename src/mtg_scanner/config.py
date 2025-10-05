@@ -100,7 +100,7 @@ MATCH_USE_ART  = _get("MATCH_USE_ART", 1, bool)
 # =========================
 # SCRYFALL / PRICES
 # =========================
-SCRYFALL_TIMEOUT = _get("SCRYFALL_TIMEOUT", 2.5, float)
+SCRYFALL_TIMEOUT = _get("SCRYFALL_TIMEOUT", 25.0, float)
 FX_URL = _get("FX_URL", "https://api.exchangerate.host/latest?base=USD&symbols=CAD", str)
 FX_TTL_SEC = _get("FX_TTL_SEC", 43200, int)
 
@@ -116,10 +116,11 @@ HTTP_POST_URL = _get("HTTP_POST_URL", "http://localhost:7125/printer/gcode/scrip
 ROI_TITLE_TOP   = _get("ROI_TITLE_TOP",   [0.057, 0.031, 0.85, 0.12], list)
 ROI_TITLE_ALT   = _get("ROI_TITLE_ALT",   [0.057, 0.60,  0.88, 0.72], list)
 
-ROI_NUMBER_MAIN   = _get("ROI_NUMBER_MAIN",   [0.045, 0.910, 0.300, 0.975], list)
-ROI_NUMBER_WIDE   = _get("ROI_NUMBER_WIDE",   [0.030, 0.900, 0.330, 0.985], list)
-ROI_NUMBER_TALL   = _get("ROI_NUMBER_TALL",   [0.045, 0.90,  0.300, 0.985], list)
-ROI_NUMBER_NARROW = _get("ROI_NUMBER_NARROW", [0.045, 0.910, 0.240, 0.975], list)
+ROI_NUMBER_MAIN   = [0.045, 0.885, 0.300, 0.990]  # was [0.045, 0.910, 0.300, 0.975]
+ROI_NUMBER_WIDE   = [0.030, 0.880, 0.330, 0.995]  # was [0.030, 0.900, 0.330, 0.985]
+ROI_NUMBER_TALL   = [0.045, 0.875, 0.300, 0.995]  # was [0.045, 0.90,  0.300, 0.985]
+ROI_NUMBER_NARROW = [0.045, 0.885, 0.240, 0.990]  # was [0.045, 0.910, 0.240, 0.975]
+
 ROI_NUMBER        = ROI_NUMBER_MAIN  # legacy alias
 
 ROI_ART = _get("ROI_ART", [0.065, 0.155, 0.935, 0.590], list)
@@ -177,4 +178,3 @@ MATCH_W_HIST = 0.34
 MATCH_W_ORB  = 0.18                  # rely less on ORB
 
 # Optional: small safety margin for fast accept/reject remains in app
-
