@@ -1,15 +1,10 @@
 # MTG Card Scanner
 
 A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering cards. It uses a USB camera, performs live detection/OCR on-card regions, looks up details via Scryfall, and gives you an interactive UI to review, compare, and export results.
-
 ---
-
 Using a lightly modified Creality Ender 3 S1, this is designed to be as non-destructive as possible. Every part in this repo can be 3D printed using whatever filament you want, while the stepper motor for the pick-up device is from the Sprite extruder. Everything can be put back together and used it as a 3D printer again.
-
 ---
-
 ![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_XG12O5ZQku.jpg?raw=true)
-
 ---
 ## ⚠️ Disclaimers
 
