@@ -20,7 +20,7 @@ Using a lightly modified Creality Ender 3 S1, this is designed to be as non-dest
 * **Reliability:** I've done my best to get this to be as stable and reliable as possible so far. Based on my current testing it will correctly read the card over 90% of the time. Given the odd special foil or layout it may have a hard time. That's why I have a comaparison that runs after the OCR to compare the card scanned to the one it thinks it is. If it's below the set tollerance, it will flag it for manual review. 
 
 ---
-## 🛠️Testing Hardware On
+## 🛠️Testing Hardware
 
 * **Raspberry Pi 5 - 8GB**
 * **Creatlity Ender 3 S1 Pro**
