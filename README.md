@@ -3,7 +3,7 @@
 A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering cards. It uses a USB camera, performs live detection/OCR on-card regions, looks up details via Scryfall, and gives you an interactive UI to review, compare, and export results.
 ---
 
-![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_DH5b7cc2cx.jpg?raw=true)
+![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_XG12O5ZQku.jpg?raw=true)
 
 ---
 ## ⚠️ Disclaimers
