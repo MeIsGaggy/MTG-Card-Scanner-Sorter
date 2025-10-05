@@ -2,12 +2,15 @@
 
 A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering cards. It uses a USB camera, performs live detection/OCR on-card regions, looks up details via Scryfall, and gives you an interactive UI to review, compare, and export results.
 ---
+Using a lightly modified Creality Ender 3 S1, this is designed to be as non-destructive as possible. Every part in this repo can be 3D printed using whatever filament you want, while the stepper motor for the pick-up device is from the Sprite extruder. Everything can be put back together and used it as a 3D printer again.
+---
 
 ![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_XG12O5ZQku.jpg?raw=true)
 
 ---
 ## ⚠️ Disclaimers
 
+* **3D Printer Hardware:** This is designed specifically for an Ender 3 S1. All STL files are modeled from that printer. They will not fit on any other printer. The motion limitations are also desgined for the Ender 3 S1. If you run this on another printer you may damage it.
 * **Processing Speed:** This app is not designed to be the fasted available for scanning TCG cards. It was made as a personal project to make minimal modifications to a 3D printer running Klipper to have it sort through my thousands of Magic cards. Apps like Manabox are much faster, however they require manually holding or mounting the phone and running cards under. Even with a 3D printed holder, the reliablity is lackluster at times. This app tried to maintain performance on a Raspberry Pi while trying to keep reliablity as high as possible.
 * **AI Assistance:** I am a hobbist, not a professional programmer. I combined my 8+ years of hobby/personal programming with ChatGPT to make something that would have either not been possible given my current skillset or would have taken so long I would have lost interest. If you are not a fan of AI assisted development, please look elsewhere.
 * **Reliability:** I've done my best to get this to be as stable and reliable as possible so far. Based on my current testing it will correctly read the card over 90% of the time. Given the odd special foil or layout it may have a hard time. That's why I have a comaparison that runs after the OCR to compare the card scanned to the one it thinks it is. If it's below the set tollerance, it will flag it for manual review. 
