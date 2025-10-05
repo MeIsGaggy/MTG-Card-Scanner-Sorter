@@ -174,12 +174,6 @@ Additional actions:
 
 ---
 
-## 🔄 Update check on startup (optional)
-
-If you set `MTG_SCANNER_REPO` to your GitHub repo slug (e.g. `"MeIsGaggy/MTG-Card-Scanner-Sorter"`), the app will query **latest GitHub Release** on boot and print a one‑line status (and can be wired to the in‑app console). Tag new releases as `vX.Y.Z` and publish them on GitHub to enable this flow.
-
----
-
 ## 🧰 CLI and environment
 
 * Start the app: `mtg-scanner`
