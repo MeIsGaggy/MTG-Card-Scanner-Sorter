@@ -72,7 +72,7 @@ pip uninstall -y opencv-python && pip install opencv-python-headless
 
 ## 🚨 3D printer running Klipper required!
 
-This app specifically listens for signals from Moonraker. Moonraker runs on Klipper firmware and without it or a 3D printer you must edit the application to listen to mock READ_TO_SCAN signals. The app does NOT have this mock functionality by default.
+This app specifically listens for signals from Moonraker. Moonraker runs on Klipper firmware and without it or a 3D printer you must edit the application to listen to mock READ_TO_SCAN signals. The app DOES have this functionality by default, all you need to do is send the SCAN_OK command to the printer and it will act as if it get a good scan from the app.
 
 If you DO have a 3D printer running Klipper, downlaod the printer.cfg located in the repo and put it on your printers Klipper install. That contains all of the macros to use the app in it's current state.
 
