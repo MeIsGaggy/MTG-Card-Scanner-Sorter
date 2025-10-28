@@ -1,19 +1,22 @@
 # MTG Card Scanner
 
-A fast, Raspberry Pi–friendly web app for scanning Magic: The Gathering cards. It uses a USB camera, performs live detection/OCR on-card regions, looks up details via Scryfall, and gives you an interactive UI to review, compare, and export results.
----
-
-![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_DH5b7cc2cx.jpg?raw=true)
+Using a lightly modified Creality Ender 3 S1, this is designed to be as non-destructive as possible. Every part in this repo can be 3D printed using whatever filament you want, while the stepper motor for the pick-up device is from the Sprite extruder. Everything can be put back together and used it as a 3D printer again. The only hardware I had to buy was vinyl tubing and a bellows suction cup. Both available on Amazon.
 
 ---
+
+![alt text](https://github.com/MeIsGaggy/MTG-Card-Scanner-Sorter/blob/main/chrome_XG12O5ZQku.jpg?raw=true)
+
+---
+
 ## ⚠️ Disclaimers
 
+* **3D Printer Hardware:** This is designed specifically for an Ender 3 S1. All STL files are modeled from that printer. They will not fit on any other printer. The motion limitations are also desgined for the Ender 3 S1. If you run this on another printer you may damage it.
 * **Processing Speed:** This app is not designed to be the fasted available for scanning TCG cards. It was made as a personal project to make minimal modifications to a 3D printer running Klipper to have it sort through my thousands of Magic cards. Apps like Manabox are much faster, however they require manually holding or mounting the phone and running cards under. Even with a 3D printed holder, the reliablity is lackluster at times. This app tried to maintain performance on a Raspberry Pi while trying to keep reliablity as high as possible.
 * **AI Assistance:** I am a hobbist, not a professional programmer. I combined my 8+ years of hobby/personal programming with ChatGPT to make something that would have either not been possible given my current skillset or would have taken so long I would have lost interest. If you are not a fan of AI assisted development, please look elsewhere.
 * **Reliability:** I've done my best to get this to be as stable and reliable as possible so far. Based on my current testing it will correctly read the card over 90% of the time. Given the odd special foil or layout it may have a hard time. That's why I have a comaparison that runs after the OCR to compare the card scanned to the one it thinks it is. If it's below the set tollerance, it will flag it for manual review. 
 
 ---
-## 🛠️Testing Hardware On
+## 🛠️Testing Hardware
 
 * **Raspberry Pi 5 - 8GB**
 * **Creatlity Ender 3 S1 Pro**
@@ -69,7 +72,7 @@ pip uninstall -y opencv-python && pip install opencv-python-headless
 
 ## 🚨 3D printer running Klipper required!
 
-This app specifically listens for signals from Moonraker. Moonraker runs on Klipper firmware and without it or a 3D printer you must edit the application to listen to mock READ_TO_SCAN signals. The app does NOT have this mock functionality by default.
+This app specifically listens for signals from Moonraker. Moonraker runs on Klipper firmware and without it or a 3D printer you must edit the application to listen to mock READ_TO_SCAN signals. The app DOES have this functionality by default, all you need to do is send the SCAN_OK command to the printer and it will act as if it get a good scan from the app.
 
 If you DO have a 3D printer running Klipper, downlaod the printer.cfg located in the repo and put it on your printers Klipper install. That contains all of the macros to use the app in it's current state.
 
@@ -164,12 +167,6 @@ Additional actions:
 * **History / Scans** — browse past captures, load a scan, or delete it.
 * **Export** — export current/selected results to CSV/JSON (see the Export modal).
 * **Settings** — open the settings modal to live‑tweak common options (also persisted via `settings.json`).
-
----
-
-## 🔄 Update check on startup (optional)
-
-If you set `MTG_SCANNER_REPO` to your GitHub repo slug (e.g. `"MeIsGaggy/MTG-Card-Scanner-Sorter"`), the app will query **latest GitHub Release** on boot and print a one‑line status (and can be wired to the in‑app console). Tag new releases as `vX.Y.Z` and publish them on GitHub to enable this flow.
 
 ---
 
