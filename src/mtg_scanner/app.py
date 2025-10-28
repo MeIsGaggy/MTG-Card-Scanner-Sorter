@@ -314,7 +314,7 @@ APPEARANCE_GAMMA_CLAMP    = globals().get("APPEARANCE_GAMMA_CLAMP", (0.65, 1.6))
 
 # Where to save exported decklists (on the device running this app)
 EXPORT_DIR = globals().get("EXPORT_DIR", "./exports")
-
+os.makedirs(EXPORT_DIR, exist_ok=True)
 # Bad list (in-memory ring + files on disk)
 try:
     os.makedirs(BAD_DIR, exist_ok=True)
@@ -555,13 +555,11 @@ def _aggregate_history(only_status: str = "pass"):
     return counts
 
 def _deckline(name: str, count: int, set_code: str, cn: str, fmt: str):
-    """
-    Archidekt & Moxfield both accept: 'N Name (SET) CN' or just 'N Name' if missing.
-    'fmt' is present for future branching but currently identical.
-    """
+    """Archidekt/Moxfield both accept: 'N Name (SET) CN' or just 'N Name'."""
     set_segment = f" ({set_code.upper()})" if set_code else ""
     cn_segment  = f" {cn}" if cn else ""
     return f"{count} {name}{set_segment}{cn_segment}".strip()
+
 
 def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, flagged, status=None):
     """Create a review record and persist it."""
@@ -650,6 +648,19 @@ def _get_rapid_engine():
         except Exception:
             _rapidocr_engine = None
     return _rapidocr_engine
+
+def _get_price(ag, key):
+    """Return a price string from ag['scry']['prices'][key] (e.g., 'usd', 'usd_foil', 'eur', 'tix')."""
+    try:
+        prices = _get(ag, "prices") or {}
+        v = prices.get(key)
+        if v in (None, "", "null"):
+            return ""
+        # normalize to plain string; Archidekt accepts raw decimal text
+        return f"{float(v):.2f}"
+    except Exception:
+        return ""
+
 
 def order_points(pts):
     rect = np.zeros((4,2), dtype='float32')
@@ -3058,6 +3069,7 @@ def api_scans_export():
 
     # write to disk on the device
     try:
+        os.makedirs(EXPORT_DIR, exist_ok=True)
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(text)
     except Exception as e:
@@ -3167,6 +3179,27 @@ def api_scans_export_download():
         def _get(ag, key, default=""):
             return (ag.get("scry") or {}).get(key, default)
 
+        def _price(ag, which):
+            try:
+                prices = (ag.get("scry") or {}).get("prices") or {}
+                foil = bool(ag.get("foil"))
+                if which == "usd":
+                    v = prices.get("usd_foil" if foil else "usd")
+                elif which == "eur":
+                    v = prices.get("eur_foil" if foil else "eur")
+                elif which == "tix":
+                    v = prices.get("tix")
+                else:
+                    v = None
+                return f"{float(v):.2f}" if v not in (None, "", "null") else ""
+            except Exception:
+                return ""
+        def _p(ag, key):
+            v = (((ag.get("scry") or {}).get("prices") or {}).get(key))
+            try:
+                return f"{float(v):.2f}" if v not in (None, "", "null") else ""
+            except Exception:
+                return ""
         # canonical field -> value function
         FIELD_FNS = OrderedDict([
             ("Quantity",             lambda ag: ag["count"]),
@@ -3191,11 +3224,11 @@ def api_scans_export_download():
             ("Sub-types",            lambda ag: _split_typeline(_get(ag, "type_line", "")).get("Sub-types","")),
             ("Super-types",          lambda ag: _split_typeline(_get(ag, "type_line", "")).get("Super-types","")),
             ("Rarity",               lambda ag: str(_get(ag, "rarity", "")).title()),
-            ("Price (Card Kingdom)", lambda ag: ""),
-            ("Price (TCG Player)",   lambda ag: ""),
-            ("Price (Star City Games)", lambda ag: ""),
-            ("Price (Card Hoarder)", lambda ag: ""),
-            ("Price (Card Market)",  lambda ag: ""),
+            ("Price (Card Kingdom)",      lambda ag: ""),                # Scryfall doesn't provide CK
+            ("Price (TCG Player)",        lambda ag: _p(ag, "usd")),     # Scryfall USD
+            ("Price (Star City Games)",   lambda ag: ""),                # not provided
+            ("Price (Card Hoarder)",      lambda ag: _p(ag, "tix")),     # Scryfall TIX
+            ("Price (Card Market)",       lambda ag: _p(ag, "eur")),     # Scryfall EUR
             ("Scryfall Oracle ID",   lambda ag: _get(ag, "oracle_id", "")),
         ])
 
@@ -3247,7 +3280,7 @@ def api_scans_export_download():
 
     # ----- Plain text (Moxfield/Archidekt paste) -----
     lines = []
-    for (name, setc, cn, foil), n in sorted(aggs.keys()):
+    for (name, setc, cn, foil) in sorted(aggs.keys()):
         # rebuild tail exactly like before
         tail = f" ({setc}) {cn}" if setc or cn else ""
         lines.append(f"{aggs[(name,setc,cn,foil)]['count']} {name}{tail}")
