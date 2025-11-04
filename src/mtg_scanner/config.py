@@ -55,13 +55,13 @@ MAX_ASSOC_DIST = _get("MAX_ASSOC_DIST", 80, int)
 MAX_CARDS      = _get("MAX_CARDS", 1, int)
 
 # Autoscan / Steady
-STEADY_MIN_FRAMES    = _get("STEADY_MIN_FRAMES", 10, int)
-AUTO_CAPTURE_WAIT_S  = _get("AUTO_CAPTURE_WAIT_S", 0.05, float)
+STEADY_MIN_FRAMES    = _get("STEADY_MIN_FRAMES", 12, int)
+AUTO_CAPTURE_WAIT_S  = _get("AUTO_CAPTURE_WAIT_S", 0.35, float)
 AUTOSCAN_OCR_TIMEOUT = _get("AUTOSCAN_OCR_TIMEOUT", 60.0, float)
-AUTOSCAN_SCRY_TIMEOUT= _get("AUTOSCAN_SCRY_TIMEOUT", 3.0, float)
-AUTOSCAN_IMG_TIMEOUT = _get("AUTOSCAN_IMG_TIMEOUT", 4.0, float)
+AUTOSCAN_SCRY_TIMEOUT= _get("AUTOSCAN_SCRY_TIMEOUT", 60.0, float)
+AUTOSCAN_IMG_TIMEOUT = _get("AUTOSCAN_IMG_TIMEOUT", 10.0, float)
 # Detection cadence/robustness
-DETECT_EVERY_N_FRAMES = _get("DETECT_EVERY_N_FRAMES", 2, int)
+DETECT_EVERY_N_FRAMES = _get("DETECT_EVERY_N_FRAMES", 1, int)
 RECTANGULARITY_MIN    = _get("RECTANGULARITY_MIN", 0.76, float)
 USE_TESS_FOR_TITLES = bool(globals().get("USE_TESS_FOR_TITLES", False))
 # =========================
@@ -125,6 +125,19 @@ ROI_NUMBER        = ROI_NUMBER_MAIN  # legacy alias
 
 ROI_ART = _get("ROI_ART", [0.065, 0.155, 0.935, 0.590], list)
 
+
+# =========================
+# AI / YOLOv5 Detection
+# =========================
+AI_DETECT_ENABLED = _get("AI_DETECT_ENABLED", True, bool)
+AI_USE_FOR_CARDS  = _get("AI_USE_FOR_CARDS",  True, bool)
+AI_USE_FOR_ROIS   = _get("AI_USE_FOR_ROIS",   True, bool)
+# Point this at your trained weights (best.pt)
+AI_MODEL_PATH     = _get("AI_MODEL_PATH", "/home/printpi/MTG_SCANNER_PROD/yolov5/runs/train/magic_vision2/weights/best.pt", str)
+# Local yolov5 repo dir (for DetectMultiBackend)
+YOLOV5_DIR        = _get("YOLOV5_DIR", "/home/printpi/MTG_SCANNER_PROD/yolov5", str)
+AI_CONF_THRES     = _get("AI_CONF_THRES", 0.25, float)
+AI_IOU_THRES      = _get("AI_IOU_THRES",  0.45, float)
 # =========================
 # DEBUG / PATHS
 # =========================
@@ -163,7 +176,7 @@ TITLE_ALLOW_TESS_FALLBACK = False
 OCR_ENABLE_BLACKHAT = False
 
 # Heavier throttling / reduced workload
-DETECT_EVERY_N_FRAMES = 2           # detect every 2nd frame
+DETECT_EVERY_N_FRAMES = 1           # detect every 2nd frame
 LIVE_OCR_ONLY_WHEN_STEADY = True     # only OCR when steady
 LIVE_OCR_MIN_INTERVAL = 0.45         # seconds between live OCR passes
 FOIL_EVERY_N_FRAMES = 10             # compute foil detection less often
@@ -177,4 +190,57 @@ MATCH_W_HASH = 0.48
 MATCH_W_HIST = 0.34
 MATCH_W_ORB  = 0.18                  # rely less on ORB
 
-# Optional: small safety margin for fast accept/reject remains in app
+# ========= AI / YOLO =========
+AI_ENABLED        = True           # master on/off
+AI_USE_FOR_CARDS  = True           # use AI to find the card box
+AI_USE_FOR_ROIS   = True           # use AI to find title/set/etc ROIs
+AI_MODEL_PATH     = "/home/printpi/MTG_SCANNER_PROD/yolov5/runs/train/magic_vision2/weights/best.pt"
+YOLOV5_DIR        = "/home/printpi/MTG_SCANNER_PROD/yolov5"
+
+AI_IMG_SIZE       = 640
+AI_CONF_THRES     = 0.25
+AI_IOU_THRES      = 0.45
+AI_MAX_DETS       = 50
+
+AI_CLASS_NAMES = ['1-Name', '2-Mana Value', '3-Set Symbol', '4-Card -', '5-Set Name']
+
+AI_ROI_KEYMAP = {
+    '1-Name'       : 'name',
+    '2-Mana Value' : 'mana_value',
+    '3-Set Symbol' : 'set_symbol',
+    '4-Card -'     : 'card',
+    '5-Set Name'   : 'set_name',
+}
+AI_CLASS_TO_KEY = AI_ROI_KEYMAP
+
+AI_BOX_THICKNESS = 8
+AI_LEGEND_FONT_SCALE = 2.5
+AI_LEGEND_FONT_THICKNESS = 3
+AI_LEGEND_LINE_THICKNESS = 8
+AI_LEGEND_PAD = 10
+
+
+AI_ONLY_MODE = True  # Only use AI ROIs; no static/fixed regions
+
+
+# --- Icon matching (set symbol) ---
+ICON_MATCH_ACCEPT = _get("ICON_MATCH_ACCEPT", 1.00, float)  # matchShapes score threshold (lower is better)
+ICON_MATCH_SIZE   = _get("ICON_MATCH_SIZE",   96,   int)    # raster size for set SVG
+ICON_MATCH_MARGIN = _get("ICON_MATCH_MARGIN", 0.02, float)  # require a clear margin vs 2nd-best
+ICON_MATCH_REQUIRE_CLEAR_WIN = _get("ICON_MATCH_REQUIRE_CLEAR_WIN", True, bool)
+
+# ---- AI name-ROI padding & OCR topline tuning ----
+AI_NAME_PAD_X = 0.055  # widen left/right so first/last letters are not clipped
+AI_NAME_PAD_Y = 0.010  # slight vertical headroom
+AI_TOPLINE_FRAC_MIN = 0.14  # at least this fraction of ROI height considered 'top line' for join
+AI_TOPLINE_MULT = 2.0      # or 2x the median box height, whichever is larger
+
+
+
+# --- Set detection fallbacks & caching ---
+SET_ICON_FALLBACK_ENABLE = _get("SET_ICON_FALLBACK_ENABLE", True, bool)   # use set icon → code when set code OCR fails
+SET_NAME_FALLBACK_ENABLE = _get("SET_NAME_FALLBACK_ENABLE", True, bool)   # use set name → code when icon fails
+
+# Cache for Scryfall /sets (code + icon_svg_uri), persisted across runs
+SCRY_SETS_CACHE_PATH = _get("SCRY_SETS_CACHE_PATH", "./cache/scry_sets.json", str)
+SCRY_SETS_CACHE_TTL_S = _get("SCRY_SETS_CACHE_TTL_S", 86400, int)  # 24h

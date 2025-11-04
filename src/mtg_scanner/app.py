@@ -1,3 +1,22 @@
+# --- bootstrap logging stub (before any imports) ---
+try:
+    _BOOT_LOG
+except NameError:
+    import time as _time
+    _BOOT_LOG = []
+    def _dbg(tag, msg, level=1):
+        try:
+            _BOOT_LOG.append((level, _time.time(), str(tag), str(msg)))
+        except Exception:
+            pass
+        try:
+            print(f"[{tag}] {msg}")
+        except Exception:
+            pass
+    def _dbg2(tag, msg):
+        _dbg(tag, msg, 2)
+# --- end bootstrap stub ---
+
 #!/usr/bin/env python3
 import time as _t
 _BOOT_LOG = []
@@ -13,17 +32,6 @@ if REPO:
                       else f"Up to date (v{res['current']})")
     check_for_update_async(REPO, get_current_version(), on_result=_on_update)
 
-
-def _dbg(tag, msg, level=1):
-    try:
-        print(f"[{tag}] {msg}")
-        _BOOT_LOG.append((level, _t.time(), str(tag), str(msg)))
-    except Exception:
-        pass
-
-def _dbg2(tag, msg):
-    _dbg(tag, msg, level=2)
-    
 try:
     import os, json, re, threading, time, signal, io, base64, shutil, glob
     from collections import OrderedDict, deque
@@ -186,28 +194,125 @@ def _scryfall_lookup_once(name, number_raw, set_hint, seq):
         with _scryfall_once_lock:
             entry = _scryfall_once.get(key)
             return entry["result"] if entry else None
-# =========================
-#MARK: DEBUG
-# =========================
-# ---- UPGRADE LOGGER & REPLAY BOOT LINES ----
-def _dbg(tag, msg, level=1):
-    # real logger that also prints depending on DEBUG_LEVEL
-    try:
-        _push_log(tag, msg, level)
-    finally:
-        if (level == 1 and DEBUG_LEVEL > 0) or (level == 2 and DEBUG_LEVEL > 1):
-            print(f"[{tag}] {msg}")
 
-def _dbg2(tag, msg):  # convenience
-    _dbg(tag, msg, level=2)
+# =======================================
+# SECTION: Logging (colorized, unified)
+# =======================================
+# Provides a single logger used across the app:
+#   _dbg(tag, msg, level=1)   -> normal
+#   _dbg2(tag, msg)           -> verbose (level=2)
+# Features:
+#   - Boot buffering: logs before initialization are captured and replayed.
+#   - Colorized [TAG] only (no 'INFO/OK/ERROR' words), color encodes severity.
+#   - Severity inference from content and 'level' for UI and console.
+import sys as _sys, time as _time
 
-# replay anything captured before the real logger existed
-for level, ts, tag, msg in _BOOT_LOG:
+try:
+    _BOOT_LOG
+except NameError:
+    _BOOT_LOG = []                         # (level, ts, tag, msg)
+_LOG_READY = False                     # flip after full init
+
+# ANSI palette (simple; cross-platform terminals handle these now)
+_ANSI = {
+    "reset": "\033[0m",
+    "ok":    "\033[32m",   # green
+    "info":  "\033[36m",   # cyan
+    "warn":  "\033[33m",   # yellow
+    "err":   "\033[31m",   # red
+}
+def _supports_color():
+    mode = str(os.environ.get("LOG_COLOR_MODE", "auto")).lower()
+    if mode == "always": return True
+    if mode == "never":  return False
     try:
-        _push_log(tag, msg, level)
+        return _sys.stdout.isatty()
+    except Exception:
+        return False
+
+def _infer_severity(tag: str, msg: str, level: int) -> str:
+    T = f"{tag or ''} {msg or ''}".upper()
+    if ("ERROR" in T) or ("EXCEPTION" in T) or ("TRACEBACK" in T) or level >= 4:
+        return "err"
+    if ("WARN" in T) or ("DEPRECATED" in T):
+        return "warn"
+    if ("SCAN_OK" in T) or ("READY" in T) or ("CONNECTED" in T) or ("LOADED" in T) or ("SUCCESS" in T) or level <= 0:
+        return "ok"
+    return "info"
+
+# Ring buffer for UI (populated by _push_log)
+from collections import deque
+log_lock = threading.Lock()
+LOG_RING = deque(maxlen=1200)
+LOG_SEQ = 0
+
+def _push_log(tag: str, msg: str, level: int = 1):
+    """Store a line for the UI. Also infers severity."""
+    global LOG_SEQ
+    try:
+        sev = _infer_severity(tag, msg, level)
+        with log_lock:
+            LOG_SEQ += 1
+            LOG_RING.append({
+                "id":  LOG_SEQ,
+                "ts":  _time.time(),
+                "tag": str(tag or ""),
+                "msg": str(msg or ""),
+                "lvl": int(level or 1),
+                "sev": sev,
+            })
     except Exception:
         pass
-_BOOT_LOG.clear()
+
+def _print_console(tag: str, msg: str, level: int = 1):
+    """Console print with colored [TAG] only; no extra severity words."""
+    try:
+        sev = _infer_severity(tag, msg, level)
+        use_color = _supports_color()
+        tag_str = f"[{tag}]"
+        if use_color:
+            color = _ANSI.get(sev, _ANSI["info"])
+            out = f"{color}{tag_str}{_ANSI['reset']} {msg}"
+        else:
+            out = f"{tag_str} {msg}"
+        print(out)
+    except Exception:
+        # As a last resort, avoid crashing logger
+        try:
+            print(f"[{tag}] {msg}")
+        except Exception:
+            pass
+
+def _buffer_or_emit(tag, msg, level=1):
+    if not _LOG_READY:
+        _BOOT_LOG.append((level, _time.time(), str(tag), str(msg)))
+    else:
+        _push_log(tag, msg, level)
+        # console print based on DEBUG_LEVEL
+        try:
+            if (level == 1 and DEBUG_LEVEL > 0) or (level == 2 and DEBUG_LEVEL > 1) or (level <= 0):
+                _print_console(tag, msg, level)
+        except Exception:
+            pass
+
+def _dbg(tag, msg, level=1):
+    _buffer_or_emit(tag, msg, level)
+
+def _dbg2(tag, msg):
+    _buffer_or_emit(tag, msg, level=2)
+
+def _logger_ready():
+    """Replay boot logs and mark the logger ready."""
+    global _LOG_READY
+    _LOG_READY = True
+    for (level, ts, tag, msg) in list(_BOOT_LOG):
+        _push_log(tag, msg, level)
+        try:
+            if (level == 1 and DEBUG_LEVEL > 0) or (level == 2 and DEBUG_LEVEL > 1) or (level <= 0):
+                _print_console(tag, msg, level)
+        except Exception:
+            pass
+    _BOOT_LOG.clear()
 
 
 if DEBUG_SAVE_ROI:
@@ -220,6 +325,7 @@ if DEBUG_SAVE_ROI:
 #MARK: GLOBALS
 # =========================
 app = Flask(__name__, static_folder='static', template_folder='templates')
+_logger_ready()
 
 APP_VERSION = get_current_version()
 UPDATE_INFO = {'current': APP_VERSION, 'latest': APP_VERSION, 'is_update': False, 'html_url': ''}
@@ -272,6 +378,22 @@ shutdown_evt = threading.Event()
 # Cache for frozen stream frames (encoded JPG bytes)
 STREAM_CACHE = {'live': None, 'card': None}
 
+# --- Live frame handoff and detection throttle ---
+try:
+    from collections import deque as _deque_type  # may already be imported
+except Exception:
+    pass
+_frame_q = deque(maxlen=1)           # latest-only queue for detector
+try:
+    DETECT_MAX_FPS  # if present in config
+except NameError:
+    DETECT_MAX_FPS = int(globals().get("DETECT_MAX_FPS", 10))
+_last_detect_ts = 0.0
+
+# Protect shared tracking state between the video (preview) and detector
+tracks_lock = threading.Lock()
+
+
 cap, output_frame, current_card_crop, scanned_card = None, None, None, None
 last_scan_ts = 0.0
 
@@ -314,6 +436,40 @@ APPEARANCE_GAMMA_CLAMP    = globals().get("APPEARANCE_GAMMA_CLAMP", (0.65, 1.6))
 
 # Where to save exported decklists (on the device running this app)
 EXPORT_DIR = globals().get("EXPORT_DIR", "./exports")
+
+# --- Autoscan timing defaults (safe fallbacks if not provided via config) ---
+try:
+    STEADY_GRACE_S = float(globals().get("STEADY_GRACE_S", 2.5))
+except Exception:
+    STEADY_GRACE_S = 2.5
+try:
+    STEADY_WATCHDOG_S = float(globals().get("STEADY_WATCHDOG_S", 6.0))
+except Exception:
+    STEADY_WATCHDOG_S = 6.0
+try:
+    AUTO_CAPTURE_WAIT_S = float(globals().get("AUTO_CAPTURE_WAIT_S", 0.18))
+except Exception:
+    AUTO_CAPTURE_WAIT_S = 0.18
+try:
+    AUTOSCAN_OCR_TIMEOUT = float(globals().get("AUTOSCAN_OCR_TIMEOUT", 2.0))
+except Exception:
+    AUTOSCAN_OCR_TIMEOUT = 2.0
+try:
+    ALWAYS_SCAN_OK = bool(globals().get("ALWAYS_SCAN_OK", True))
+except Exception:
+    ALWAYS_SCAN_OK = True
+
+# --- AI name ROI padding + topline join tuning (read from config if present) ---
+# --- Number-band padding (left-biased) ---
+_AI_CARD_PAD_LEFT   = float(globals().get("AI_CARD_PAD_LEFT", 0.10))
+_AI_CARD_PAD_RIGHT  = float(globals().get("AI_CARD_PAD_RIGHT", 0.02))
+_AI_CARD_PAD_Y      = float(globals().get("AI_CARD_PAD_Y", 0.1))
+
+_AI_NAME_PAD_X = float(globals().get("AI_NAME_PAD_X", 0.045))
+_AI_NAME_PAD_Y = float(globals().get("AI_NAME_PAD_Y", 0.010))
+_AI_TOPLINE_FRAC_MIN = float(globals().get("AI_TOPLINE_FRAC_MIN", 0.12))
+_AI_TOPLINE_MULT = float(globals().get("AI_TOPLINE_MULT", 1.8))
+
 os.makedirs(EXPORT_DIR, exist_ok=True)
 # Bad list (in-memory ring + files on disk)
 try:
@@ -598,7 +754,25 @@ def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, fla
     if not scry:
         review_reasons.append("No Scryfall result; manual selection required.")
 
-    # Your requested behavior:
+ 
+    # If we queried Scryfall without all three inputs, record which are missing
+    try:
+        nm_ok = bool((ocr or {}).get("name") or (ocr or {}).get("name_raw"))
+        set_ok = bool((ocr or {}).get("set_hint"))
+        cn_raw = (ocr or {}).get("number_raw") or (ocr or {}).get("number") or ""
+        try:
+            cn_ok = bool(_parse_collector_for_display(cn_raw or ""))
+        except Exception:
+            cn_ok = bool(cn_raw.strip())
+        if not (nm_ok and set_ok and cn_ok):
+            missing = []
+            if not nm_ok: missing.append("name")
+            if not set_ok: missing.append("set")
+            if not cn_ok: missing.append("card number")
+            review_reasons.append("Scryfall was queried without full data: missing " + ", ".join(missing) + ".")
+    except Exception:
+        pass
+   # Your requested behavior:
     # If we matched by cn_set_only and the visual match passed, fix the saved name to Scryfall's.
     if (match_mode == "cn_set_only") and bool(match_ok) and scry and scry.get("name"):
         ocr = dict(ocr or {})
@@ -616,6 +790,11 @@ def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, fla
         "number_raw": (ocr or {}).get("number_raw") or "",
         "set_hint": (ocr or {}).get("set_hint") or "",
         "foil": bool((ocr or {}).get("foil", False)),
+        "inputs_present": {
+            "name": bool((ocr or {}).get("name") or (ocr or {}).get("name_raw")),
+            "set":  bool((ocr or {}).get("set_hint")),
+            "number": bool((_parse_collector_for_display((ocr or {}).get("number_raw") or (ocr or {}).get("number") or "") or "").strip())
+        },
         "match_score": round(float(ms), 3),
         "match_ok": bool(match_ok) if match_ok is not None else None,
         "flagged": bool(flagged),
@@ -694,6 +873,16 @@ def _roi_rel_pad(img, roi, pad_x=0.02, pad_y=0.00):
 # use a hair of horizontal padding on the title bands
 _crop_title_roi_top = lambda img: _roi_rel_pad(img, ROI_TITLE_TOP, pad_x=0.02, pad_y=0.0)
 _crop_title_roi_alt = lambda img: _roi_rel_pad(img, ROI_TITLE_ALT, pad_x=0.02, pad_y=0.0)
+# === AI-aware ROI helpers (override) ===
+def _crop_title_roi_top(img):
+    # Prefer AI 'name' box; fallback to legacy top band
+    roi = _ai_crop(img, "name", pad_x=_AI_NAME_PAD_X, pad_y=_AI_NAME_PAD_Y) if _ai_enabled() else None
+    return roi if roi is not None and roi.size > 0 else _roi_rel_pad(img, ROI_TITLE_TOP, pad_x=0.02, pad_y=0.0)
+
+def _crop_title_roi_alt(img):
+    roi = _ai_crop(img, "name", pad_x=_AI_NAME_PAD_X, pad_y=_AI_NAME_PAD_Y) if _ai_enabled() else None
+    return roi if roi is not None and roi.size > 0 else _roi_rel_pad(img, ROI_TITLE_ALT, pad_x=0.02, pad_y=0.0)
+
 
 def _roi_rel(img, roi):
     h,w = img.shape[:2]
@@ -900,7 +1089,11 @@ def _read_lines_for_title(roi_src_bgr, blacklist_re=None, band_name="", foil=Fal
             items = [((r[0][0][0], 0.5*(r[0][0][1]+r[0][2][1])), r[1], float(r[2])*100.0) for r in res]
             ys = [p[1] for (p, _, _) in items]
             y0 = min(ys) if ys else 0.0
-            top_band_h = 0.12 * bgr.shape[0]
+            import numpy as _np
+            # dynamic: ensure we include the whole title line even when the ROI is tight
+            _box_heights = _np.array([abs(r[0][0][1]-r[0][2][1]) for r in res], dtype=float)
+            _med_h = float(_np.median(_box_heights)) if _box_heights.size else 0.0
+            top_band_h = max(_AI_TOPLINE_FRAC_MIN * bgr.shape[0], _AI_TOPLINE_MULT * _med_h)
             top_line = sorted([it for it in items if (it[0][1] - y0) <= top_band_h], key=lambda it: it[0][0])
             if top_line:
                 joined = " ".join(t for _, t, _ in top_line).strip()
@@ -1081,7 +1274,8 @@ def _current_settings_effective():
         return out
 
 
-def _read_collector_number(img, foil: bool = False):
+
+def _orig_read_collector_number(img, foil: bool = False):
     rois = [ROI_NUMBER_NARROW, ROI_NUMBER_MAIN, ROI_NUMBER_TALL, ROI_NUMBER_WIDE]
     best_roi = None
     for roi in rois:
@@ -1127,6 +1321,56 @@ def _read_collector_number(img, foil: bool = False):
         except Exception:
             pass
     return "", 0.0
+def _read_collector_number(img, foil: bool = False):
+    # Try AI-detected "card band" first (has collector number and set code)
+    roi = None
+    if _ai_enabled():
+        roi = _ai_crop_asym(img, "card", pad_left=_AI_CARD_PAD_LEFT, pad_right=_AI_CARD_PAD_RIGHT, pad_top=0.0, pad_bottom=0.0)
+    if roi is None or roi.size == 0:
+        # try set_name band as well (sym pad is fine here)
+        roi = _ai_crop(img, "set_name", pad_x=_AI_CARD_PAD_RIGHT, pad_y=_AI_CARD_PAD_Y)
+    if roi is not None and roi.size > 0:
+        try:
+            src = _enhance_for_foil(roi) if foil else roi
+            gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            if _ink_present_quick(gray):
+                g = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+                g = cv2.GaussianBlur(g, (3, 3), 0)
+                bin_img = cv2.adaptiveThreshold(
+                    g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+                    17 if foil else 23, 3
+                )
+                # RapidOCR (color) for robustness
+                if RAPIDOCR_AVAILABLE and "rapidocr" in OCR_BACKEND:
+                    try:
+                        eng = _get_rapid_engine()
+                        rbgr = _prep_roi_for_rapid_bgr(src)
+                        res = (eng(rbgr)[0] or [])
+                        raw = " ".join(r[1] for r in res)
+                        for tok, conf in _num_tokens_from_text(raw):
+                            return tok, max(conf, 39.0)
+                    except Exception:
+                        pass
+                # Tesseract fallback on binary/blackhat
+                if pytesseract is not None and "tesseract" in OCR_BACKEND:
+                    try:
+                        raw = pytesseract.image_to_string(bin_img, config=_TESS_NUM_CFG, lang="eng") or ""
+                        for tok, conf in _num_tokens_from_text(raw):
+                            return tok, conf
+                    except Exception:
+                        pass
+                    try:
+                        bh = _blackhat_bin(gray)
+                        raw2 = pytesseract.image_to_string(bh, config=_TESS_NUM_CFG, lang="eng") or ""
+                        for tok, conf in _num_tokens_from_text(raw2):
+                            return tok, max(conf, 39.0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    # Fallback to legacy multi-ROI strategy
+    return _orig_read_collector_number(img, foil)
+
 
 def _parse_collector_for_display(raw: str) -> str:
     if not raw:
@@ -1414,7 +1658,7 @@ def _enhance_for_foil(roi_bgr: np.ndarray) -> np.ndarray:
     hsv2 = cv2.merge([h, s, v])
     return cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
 
-def ocr_from_card_upright(img):
+def _orig_ocr_from_card_upright(img):
     roi_top = _crop_title_roi_top(img)
     roi_alt = _crop_title_roi_alt(img)
 
@@ -1461,6 +1705,334 @@ def ocr_from_card_upright(img):
         "foil": bool(foil),
         "foil_score": float(foil_score),
     }
+# --- Set icon matching helpers (fallback when no collector number / set code) ---
+try:
+    import cairosvg as _cairosvg  # optional for local SVG->PNG rasterization
+    _HAVE_CAIROSVG = True
+except Exception:
+    _cairosvg = None
+    _HAVE_CAIROSVG = False
+
+_set_icon_cache = {}
+_set_icon_cache_lock = threading.Lock()
+
+def _symbol_mask_from_rgba(_img):
+    """Return a clean 0/255 mask for a set icon image (handles RGBA or BGR)."""
+    try:
+        if _img is None or getattr(_img, "size", 0) == 0:
+            return None
+        import numpy as _np
+        import cv2
+        if _img.ndim == 3 and _img.shape[2] == 4:
+            alpha = _img[:, :, 3]
+            mask = (alpha > 0).astype(_np.uint8) * 255
+        else:
+            gray = cv2.cvtColor(_img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
+            _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if mask.mean() > 127:  # keep symbol white on black
+                mask = 255 - mask
+        # Keep largest blob
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+        biggest = max(cnts, key=cv2.contourArea)
+        clean = _np.zeros_like(mask)
+        cv2.drawContours(clean, [biggest], -1, 255, thickness=cv2.FILLED)
+        return clean
+    except Exception:
+        return None
+
+def _fetch_set_icon_mask(set_code: str, svg_url: str, size: int = 96):
+    """Fetch and rasterize a set icon (SVG) to a binary mask, with caching."""
+    key = (str(set_code or "").lower(), int(size))
+    with _set_icon_cache_lock:
+        if key in _set_icon_cache:
+            return _set_icon_cache[key]
+    import numpy as _np, cv2
+    png_bytes = b""
+    try:
+        if svg_url:
+            if _HAVE_CAIROSVG:
+                try:
+                    _svg_text = (_HTTP.get(svg_url, timeout=SCRYFALL_TIMEOUT).text or "")
+                    if _svg_text:
+                        png_bytes = _cairosvg.svg2png(bytestring=_svg_text.encode("utf-8"),
+                                                      output_width=size, output_height=size)
+                except Exception:
+                    png_bytes = b""
+            if not png_bytes:
+                # Scryfall sometimes supports PNG query on the svg endpoint
+                try:
+                    r = _HTTP.get(svg_url, params={"format": "png", "size": str(size)}, timeout=SCRYFALL_TIMEOUT)
+                    if r.status_code == 200:
+                        png_bytes = r.content or b""
+                except Exception:
+                    png_bytes = b""
+    except Exception:
+        png_bytes = b""
+    if not png_bytes:
+        return None
+    arr = _np.frombuffer(png_bytes, _np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    m = _symbol_mask_from_rgba(img)
+    with _set_icon_cache_lock:
+        _set_icon_cache[key] = m
+    return m
+
+
+def _match_set_symbol_to_code(card_bgr, name_hint: str = ""):
+    """Infer set code by matching the detected set icon against Scryfall set icons.
+       Returns (set_code, confidence) or ("", 0.0). Uses multi-cue scoring + margin check.
+    """
+    try:
+        import cv2
+        import numpy as _np
+        # 1) crop set_symbol ROI via AI
+        roi = _ai_crop(card_bgr, "set_symbol") if _ai_enabled() else None
+        if roi is None or getattr(roi, "size", 0) == 0:
+            return "", 0.0
+        mask_roi = _symbol_mask_from_rgba(roi)
+        if mask_roi is None or cv2.countNonZero(mask_roi) < 50:
+            return "", 0.0
+        cnts, _ = cv2.findContours(mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return "", 0.0
+        cnt_roi = max(cnts, key=cv2.contourArea)
+        # Normalize ROI contour size
+        mask_roi = cv2.resize(mask_roi, (int(globals().get("ICON_MATCH_SIZE", 96)), int(globals().get("ICON_MATCH_SIZE", 96))), interpolation=cv2.INTER_AREA)
+        cnts, _ = cv2.findContours(mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnt_roi = max(cnts, key=cv2.contourArea) if cnts else cnt_roi
+
+        # Helper: hu distance
+        def _hu_distance(cnt_a, cnt_b):
+            try:
+                hu_a = cv2.HuMoments(cv2.moments(cnt_a)).flatten()
+                hu_b = cv2.HuMoments(cv2.moments(cnt_b)).flatten()
+                # stability: log transform
+                hu_a = _np.sign(hu_a) * _np.log1p(_np.abs(hu_a))
+                hu_b = _np.sign(hu_b) * _np.log1p(_np.abs(hu_b))
+                return float(_np.mean(_np.abs(hu_a - hu_b)))
+            except Exception:
+                return 0.5  # neutral
+
+        # 2) Candidate sets from prints of the fuzzy name (keeps this fast)
+        set_codes = []
+        if name_hint:
+            try:
+                fuzzy = _scryfall_request("https://api.scryfall.com/cards/named", {"fuzzy": name_hint})
+                prints_uri = (fuzzy or {}).get("prints_search_uri")
+                if prints_uri:
+                    prints = _scryfall_request(prints_uri, {"order": "released"})
+                    if prints and isinstance(prints, dict):
+                        plist = prints.get("data") or []
+                        # unique set codes only
+                        set_codes = sorted({(p.get("set") or "").lower() for p in plist if p.get("set")})
+            except Exception:
+                set_codes = []
+        if not set_codes:
+            # Fall back to all set codes (last 300 sets) to avoid false positives on tiny candidate lists
+            sets = _get_all_scry_sets() or []
+            # Prefer modern releases by reversing (Scryfall returns oldest first)
+            set_codes = [s.get("code","").lower() for s in reversed(sets) if s.get("code")]
+
+        # 3) Score each candidate with multiple cues
+        scored = []
+        size = int(globals().get("ICON_MATCH_SIZE", 96))
+        for code in set_codes[:800]:  # hard cap for safety
+            try:
+                S = _scryfall_request(f"https://api.scryfall.com/sets/{code}", {})
+                svg_url = (S or {}).get("icon_svg_uri")
+                if not svg_url:
+                    continue
+                m = _fetch_set_icon_mask(code, svg_url, size=size)
+                if m is None or cv2.countNonZero(m) < 30:
+                    continue
+                icnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not icnts:
+                    continue
+                cnt_icon = max(icnts, key=cv2.contourArea)
+
+                # Basic matchShapes (lower is better)
+                ms = float(cv2.matchShapes(cnt_roi, cnt_icon, cv2.CONTOURS_MATCH_I1, 0.0))
+
+                # Fill ratio cue (shape compactness)
+                x,y,w,h = cv2.boundingRect(cnt_icon)
+                fr_icon = cv2.contourArea(cnt_icon) / max(1.0, float(w*h))
+                x2,y2,w2,h2 = cv2.boundingRect(cnt_roi)
+                fr_roi = cv2.contourArea(cnt_roi) / max(1.0, float(w2*h2))
+                fr_diff = abs(fr_icon - fr_roi)
+
+                # Hu invariant distance
+                hu = _hu_distance(cnt_roi, cnt_icon)
+
+                # Combined score (tuned weights)
+                score = ms + 0.12*fr_diff + 0.08*hu
+
+                scored.append((score, code, ms, fr_diff, hu))
+            except Exception:
+                continue
+
+        if not scored:
+            return "", 0.0
+
+        scored.sort(key=lambda t: t[0])
+        best_score, best_code, ms, fr_diff, hu = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else (best_score + 1.0)
+
+        accept_th = float(globals().get("ICON_MATCH_ACCEPT", 1.00))
+        margin = float(globals().get("ICON_MATCH_MARGIN", 0.02))
+        require_margin = bool(globals().get("ICON_MATCH_REQUIRE_CLEAR_WIN", True))
+
+        # Accept only if below threshold and (optionally) clearly better than 2nd best
+        if best_score < accept_th and (not require_margin or (second_score - best_score) >= margin):
+            conf = 1.0 / (1.0 + best_score)
+            _dbg("SET_ICON", f"Matched set icon → {best_code.upper()} (score={best_score:.3f}, Δ={second_score-best_score:.3f})")
+            return best_code, float(conf)
+
+        # Otherwise, be conservative: no guess
+        if scored:
+            _dbg("SET_ICON", f"No clear icon winner (best={best_score:.3f}, second={second_score:.3f}); skipping.")
+        return "", 0.0
+    except Exception as _e:
+        _dbg("SET_ICON", f"icon match failed: {_e}")
+        return "", 0.0
+# --- end set icon helpers ---
+
+# --- Fallback: derive set code from OCR'd "set_name" ROI if icon match fails ---
+_scry_sets_cache = {"ts": 0, "data": []}
+
+def _get_all_scry_sets():
+    """Fetch (and cache) Scryfall set list; persist to disk for offline use."""
+    now = time.time()
+    ttl = int(globals().get("SCRY_SETS_CACHE_TTL_S", 86400))
+    cache_path = str(globals().get("SCRY_SETS_CACHE_PATH", "./cache/scry_sets.json"))
+    # 1) Use in-memory cache if fresh
+    if _scry_sets_cache["data"] and (now - _scry_sets_cache["ts"] < 3600):
+        return _scry_sets_cache["data"]
+    # 2) Try disk cache
+    try:
+        import os, json
+        if os.path.exists(cache_path):
+            st = os.stat(cache_path)
+            if (now - st.st_mtime) < ttl:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    items = json.load(f) or []
+                    _scry_sets_cache.update({"ts": now, "data": items})
+                    return items
+    except Exception:
+        pass
+    # 3) Fetch from Scryfall
+    try:
+        res = _scryfall_request("https://api.scryfall.com/sets", {})
+        items = (res or {}).get("data") or []
+        _scry_sets_cache.update({"ts": now, "data": items})
+        try:
+            os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(items, f)
+        except Exception:
+            pass
+        return items
+    except Exception:
+        # 4) Fallback to stale disk cache if present
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                items = json.load(f) or []
+                _scry_sets_cache.update({"ts": now, "data": items})
+                return items
+        except Exception:
+            return _scry_sets_cache["data"]
+
+
+def _read_set_name_roi(card_bgr):
+    """OCR the YOLO 'set_name' ROI to text."""
+    try:
+        roi = _ai_crop(card_bgr, "set_name") if _ai_enabled() else None
+        if roi is None or getattr(roi, "size", 0) == 0:
+            return ""
+        # Reuse the general OCR pipeline
+        bin_img = _prep_roi_for_ocr(roi)
+        txt, _, _ = _read_text_general(bin_img)
+        return (txt or "").strip()
+    except Exception:
+        return ""
+
+def _set_code_from_set_name(name_raw):
+    """Fuzzy-match a human set name to a Scryfall set CODE."""
+    try:
+        nm = (name_raw or "").strip()
+        if not nm:
+            return ""
+        sets = _get_all_scry_sets()
+        if not sets:
+            return ""
+        # Build searchable names
+        candidates = [(s.get("name",""), s.get("code","")) for s in sets if s.get("code")]
+        try:
+            from rapidfuzz import process, fuzz
+            # Strong match on full name first
+            best = process.extractOne(nm, [c[0] for c in candidates], scorer=fuzz.WRatio, score_cutoff=82)
+            if best:
+                idx = best[2]
+                return candidates[idx][1].lower()
+            # Looser fallback
+            best = process.extractOne(nm, [c[0] for c in candidates], scorer=fuzz.token_set_ratio, score_cutoff=75)
+            if best:
+                idx = best[2]
+                return candidates[idx][1].lower()
+        except Exception:
+            # Simple fallback: direct equality ignoring case
+            for n, code in candidates:
+                if n.lower() == nm.lower():
+                    return code.lower()
+        return ""
+    except Exception:
+        return ""
+# --- end set-name fallback ---
+
+def ocr_from_card_upright(img):
+    # Use original OCR pipeline (now AI-aware title + numbers via overrides)
+    res = _orig_ocr_from_card_upright(img)
+    # Replace set_hint using AI "card" region if available
+    try:
+        roi = _ai_crop(img, "card") if _ai_enabled() else None
+        if roi is None or roi.size == 0:
+            roi = _roi_rel(img, ROI_NUMBER_WIDE)
+        sh = _read_set_hint(roi) or ""
+        if sh:
+            res["set_hint"] = sh
+    except Exception:
+        pass
+    # Fallback: if no collector number AND no set_hint yet, try set-icon matching
+    try:
+        if (not res.get("set_hint")) and globals().get("SET_ICON_FALLBACK_ENABLE", True):
+            code, score = _match_set_symbol_to_code(img, name_hint=(res.get("name") or res.get("name_raw") or ""))
+            if code:
+                res["set_hint"] = code; _dbg("SET_ICON", f"set_hint<-icon = {code}")
+    except Exception as _e:
+        _dbg("SET_ICON", f"fallback failed: {_e}")
+    # Fallback A: use set icon to infer set code (if we still lack set_hint)
+    try:
+        if not res.get("set_hint"):
+            code, score = _match_set_symbol_to_code(img, name_hint=(res.get("name") or res.get("name_raw") or ""))
+            if code:
+                res["set_hint"] = code; _dbg("SET_ICON", f"set_hint<-icon = {code}")
+    except Exception as _e:
+        _dbg("SET_ICON", f"icon fallback failed: {_e}")
+    # Fallback B: OCR the "set_name" ROI and map to a set code
+    try:
+        if (not res.get("set_hint")) and globals().get("SET_NAME_FALLBACK_ENABLE", True):
+            _setnm = _read_set_name_roi(img)
+            _code2 = _set_code_from_set_name(_setnm)
+            if _code2:
+                res["set_hint"] = _code2; _dbg("SET_NAME", f"set_hint<-name = {_code2}")
+    except Exception as _e:
+        _dbg("SET_NAME", f"name->code fallback failed: {_e}")
+
+    
+    return res
+
 
 def _pick_best_title_line(lines):
     if not lines:
@@ -1497,6 +2069,81 @@ def _scryfall_request(url, params=None, tries=2):
             _SCRY_OFFLINE["until"] = time.time() + 60.0  # 1 minute backoff
         time.sleep(0.15)
     return None
+
+def _scry_fix_mismatch(choice, name, number_raw, set_hint):
+    """
+    If we have a set hint and/or collector number and the chosen print
+    doesn't match, try to fetch the correct printing explicitly.
+    Returns a (possibly new) choice or the original one if nothing better is found.
+    """
+    try:
+        nm_orig = (name or "").strip()
+        set_hint = (set_hint or "").lower()
+
+        # normalize collector number like the lookup does (strip leading zeros)
+        import re as _re
+        def norm_cn(cn):
+            if not cn:
+                return ""
+            m = _re.match(r"0*(\d{1,4})$", str(cn))
+            return m.group(1) if m else ""
+
+        cn_norm = _normalize_cn_for_search(number_raw)
+
+        # If nothing to enforce, or the current choice already matches, keep it.
+        if not set_hint and not cn_norm:
+            return choice
+        try:
+            if choice and (not set_hint or (choice.get("set","") == set_hint)) and \
+               (not cn_norm or norm_cn(choice.get("collector_number")) == cn_norm):
+                return choice
+        except Exception:
+            pass
+
+        # small fetch helper that mirrors the rest of the code
+        def fetch(url, params=None):
+            r = _scryfall_request(url, params or {})
+            return r if r and r.get("object") != "error" else None
+
+        # Strategy 1: strict name + set + cn
+        if nm_orig and set_hint and cn_norm:
+            data = fetch("https://api.scryfall.com/cards/search", {
+                "q": f'!"{nm_orig}" cn:{cn_norm} set:{set_hint}',
+                "unique": "prints", "order": "released", "dir": "desc"
+            })
+            if data and data.get("data"):
+                card = data["data"][0]
+                try: card["_match_mode"] = "postfix_enforce_name_set_cn"
+                except Exception: pass
+                return card
+
+        # Strategy 2: set + cn (no name)
+        if set_hint and cn_norm:
+            data = fetch("https://api.scryfall.com/cards/search", {
+                "q": f"cn:{cn_norm} set:{set_hint}",
+                "unique": "prints", "order": "released", "dir": "desc"
+            })
+            if data and data.get("data"):
+                card = data["data"][0]
+                try: card["_match_mode"] = "postfix_enforce_set_cn"
+                except Exception: pass
+                return card
+
+        # Strategy 3: name + set (ignore cn)
+        if nm_orig and set_hint:
+            data = fetch("https://api.scryfall.com/cards/search", {
+                "q": f'!"{nm_orig}" set:{set_hint}',
+                "unique": "prints", "order": "released", "dir": "desc"
+            })
+            if data and data.get("data"):
+                card = data["data"][0]
+                try: card["_match_mode"] = "postfix_enforce_name_set"
+                except Exception: pass
+                return card
+
+        return choice
+    except Exception:
+        return choice
 
 def _scryfall_lookup(name, number_raw, set_hint=""):
     nm_orig = (name or "").strip()
@@ -1950,6 +2597,201 @@ def _publish_compare_visual(details):
 # =========================
 #MARK: THREADS / WORKERS
 # =========================
+
+# =========================
+#MARK: AI / YOLOv5 ROI DETECTION
+# =========================
+_ai_lock = threading.Lock()
+_ai_last = {"time": 0.0, "boxes": {}, "raw": []}
+_ai_model_loaded = False
+
+# Map keys -> colors (BGR) for overlay
+_AI_COLORS = {
+    "name": (255, 0, 0),          # blue
+    "mana_value": (0, 165, 255),  # orange
+    "set_symbol": (0, 255, 0),    # green
+    "card": (0, 0, 255),          # red
+    "set_name": (255, 0, 255),    # purple
+}
+
+def _ai_enabled():
+    try:
+        return bool(globals().get("AI_ENABLED", False) and globals().get("AI_USE_FOR_ROIS", False))
+    except Exception:
+        return False
+
+def _ai_load():
+    """Lazy-load YOLOv5 model."""
+    global _ai_model_loaded, _ai_model, _ai_fn, _ai_letterbox, _ai_scale_boxes, _ai_device, _ai_names, _ai_stride
+    if _ai_model_loaded:
+        return True
+    if not _ai_enabled():
+        return False
+    try:
+        import sys
+        sys.path.insert(0, str(YOLOV5_DIR))
+        import torch
+        from models.common import DetectMultiBackend
+        from utils.torch_utils import select_device
+        from utils.general import non_max_suppression, scale_boxes
+        from utils.augmentations import letterbox
+        device = select_device("")
+        model = DetectMultiBackend(AI_MODEL_PATH, device=device, dnn=False, data=None, fp16=False)
+        _ai_stride = int(getattr(model, "stride", 32))
+        _ai_names = getattr(model, "names", None) or AI_CLASS_NAMES
+        _ai_device = device
+        _ai_model = model
+        _ai_fn = non_max_suppression
+        _ai_scale_boxes = scale_boxes
+        _ai_letterbox = letterbox
+        _ai_model_loaded = True
+        _dbg("AI", f"Loaded YOLOv5 model: {_ai_names}")
+        return True
+    except Exception as e:
+        _dbg("AI ERROR", f"Failed to load YOLOv5: {e}")
+        _ai_model_loaded = False
+        return False
+
+def _ai_detect_boxes(bgr):
+    """Run detection on the given card crop (BGR). Returns dict key->norm_box."""
+    if bgr is None or bgr.size == 0:
+        return {}
+    if not _ai_load():
+        return {}
+    try:
+        import torch
+        img0 = bgr
+        # Letterbox
+        im = _ai_letterbox(img0, AI_IMG_SIZE, stride=_ai_stride, auto=True)[0]
+        im = im.transpose((2, 0, 1))[::-1]  # BGR->RGB, to CHW
+        im = np.ascontiguousarray(im)
+        im = torch.from_numpy(im).to(_ai_device)
+        im = im.float()  # uint8 to fp32
+        im /= 255.0
+        if im.ndimension() == 3:
+            im = im.unsqueeze(0)
+        pred = _ai_model(im, augment=False, visualize=False)
+        pred = _ai_fn(pred, AI_CONF_THRES, AI_IOU_THRES, max_det=int(globals().get("AI_MAX_DETS", 50)))[0]
+        h0, w0 = img0.shape[:2]
+        out = {}
+        raw = []
+        if pred is not None and len(pred):
+            pred[:, :4] = _ai_scale_boxes(im.shape[2:], pred[:, :4], img0.shape).round()
+            for *xyxy, conf, cls in pred.tolist():
+                x0, y0, x1, y1 = xyxy
+                x0 = max(0, min(w0 - 1, int(x0))); x1 = max(0, min(w0 - 1, int(x1)))
+                y0 = max(0, min(h0 - 1, int(y0))); y1 = max(0, min(h0 - 1, int(y1)))
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                # Normalize
+                nb = [x0 / w0, y0 / h0, x1 / w0, y1 / h0]
+                # Map to our key
+                name = str(_ai_names[int(cls)]) if int(cls) < len(_ai_names) else str(int(cls))
+                key = AI_CLASS_TO_KEY.get(name, None) if isinstance(AI_CLASS_TO_KEY, dict) else None
+                if not key:
+                    # also try if model names already match our keys
+                    if name in ("name","mana_value","set_symbol","card","set_name"):
+                        key = name
+                raw.append({"name": name, "key": key, "conf": float(conf), "box": nb})
+                if key:
+                    # Keep highest confidence per key
+                    if key not in out or float(conf) > out[key][4]:
+                        out[key] = [nb[0], nb[1], nb[2], nb[3], float(conf)]
+        with _ai_lock:
+            _ai_last["time"] = time.time()
+            _ai_last["boxes"] = out
+            _ai_last["raw"] = raw
+        return out
+    except Exception as e:
+        _dbg("AI ERROR", f"Inference failed: {e}")
+        return {}
+
+def _ai_get_norm_box(key):
+    with _ai_lock:
+        b = _ai_last.get("boxes", {}).get(key)
+    if b is None:
+        return None
+    import numpy as np
+    arr = np.asarray(b).reshape(-1)
+    if arr.size < 4:
+        return None
+    return [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
+
+def _ai_crop(img, key, pad_x=0.0, pad_y=0.0):
+    b = _ai_get_norm_box(key)
+    if b is None:
+        return None
+    # expand the normalized box a bit to avoid clipping first/last letters
+    x0,y0,x1,y1 = b
+    x0 = max(0.0, x0 - float(pad_x)); x1 = min(1.0, x1 + float(pad_x))
+    y0 = max(0.0, y0 - float(pad_y)); y1 = min(1.0, y1 + float(pad_y))
+    return _roi_rel(img, (x0,y0,x1,y1))
+
+
+
+def _ai_crop_asym(img, key, pad_left=0.0, pad_right=0.0, pad_top=0.0, pad_bottom=0.0):
+    b = _ai_get_norm_box(key)
+    if b is None:
+        return None
+    x0,y0,x1,y1 = [float(v) for v in b]
+    x0 = max(0.0, x0 - float(pad_left));  x1 = min(1.0, x1 + float(pad_right))
+    y0 = max(0.0, y0 - float(pad_top));   y1 = min(1.0, y1 + float(pad_bottom))
+    return _roi_rel(img, (x0,y0,x1,y1))
+
+def _update_ai_rois(card_bgr):
+    if not _ai_enabled():
+        return
+    _ai_detect_boxes(card_bgr)
+
+def _draw_ai_overlay(img):
+    if img is None or img.size == 0:
+        return
+    with _ai_lock:
+        boxes = dict(_ai_last.get("boxes", {}))
+        raw = list(_ai_last.get("raw", []))
+    if not boxes and not raw:
+        return
+    h, w = img.shape[:2]
+
+    box_th   = int(globals().get("AI_BOX_THICKNESS", 5))
+    font_s   = float(globals().get("AI_LEGEND_FONT_SCALE", 0.7))
+    font_th  = int(globals().get("AI_LEGEND_FONT_THICKNESS", 1))
+    line_th  = int(globals().get("AI_LEGEND_LINE_THICKNESS", 5))
+    pad      = int(globals().get("AI_LEGEND_PAD", 10))
+
+    # draw boxes
+    for key, val in boxes.items():
+        x0n = float(val[0]); y0n = float(val[1]); x1n = float(val[2]); y1n = float(val[3])
+        # Make overlay reflect OCR padding for 'card' box
+        if key == "card":
+            x0n = max(0.0, x0n - _AI_CARD_PAD_LEFT)
+            x1n = min(1.0, x1n + _AI_CARD_PAD_RIGHT)
+            y0n = y0n
+            y1n = y1n
+        x0 = int(x0n*w); y0 = int(y0n*h); x1 = int(x1n*w); y1 = int(y1n*h)
+        color = _AI_COLORS.get(key, (255,255,255))
+        cv2.rectangle(img, (x0, y0), (x1, y1), color, box_th)
+        try:
+            conf = float(val[4]) if len(val) >= 5 else 0.0
+            label = f"{key} {conf*100:.0f}%"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_s, font_th)
+        except Exception:
+            pass
+
+    # legend with dynamic spacing
+    x, y = pad, pad
+    legend = [("name","1-Name"),("mana_value","2-Mana Value"),
+              ("set_symbol","3-Set Symbol"),("card","4-Card -"),
+              ("set_name","5-Set Name")]
+    for key, label in legend:
+        color = _AI_COLORS.get(key, (255,255,255))
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_s, font_th)
+        mid = y + th // 2
+        cv2.line(img, (x, mid), (x+24, mid), color, line_th)
+        cv2.putText(img, label, (x+30, y + th),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_s, (220,220,220), font_th, cv2.LINE_AA)
+        y += th + max(8, int(0.5*th))   # <— spacing scales with font size
+
 def _open_camera():
     try:
         cap = cv2.VideoCapture(int(CAMERA_DEVICE), cv2.CAP_V4L2)
@@ -1961,7 +2803,7 @@ def _open_camera():
     cap.set(cv2.CAP_PROP_FPS, REQ_FPS)
     # PERF: keep camera queue short to avoid backlog when CPU spikes
     try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
     if not cap.isOpened() or cap.get(cv2.CAP_PROP_FPS) == 0:
@@ -1972,7 +2814,7 @@ def _open_camera():
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, REQ_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS, REQ_FPS)
         try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
     return cap if cap.isOpened() else None
@@ -1997,8 +2839,9 @@ def video_thread():
                 rv = _detect_roi_version
 
             if rv != roi_ver_seen:
-                with video_lock:
+                with tracks_lock:
                     tracks.clear()
+                with video_lock:
                     scanner_state.update({'locked': False, 'locked_frames': 0, 'steady': False})
                 roi_ver_seen = rv
 
@@ -2010,89 +2853,172 @@ def video_thread():
             if not ok:
                 time.sleep(0.02)
                 continue
+            # hand off latest frame to detector without blocking
+            try:
+                _frame_q.clear(); _frame_q.append(frame)
+            except Exception:
+                pass
 
-            dets = []
-            if frame_i % DETECT_EVERY_N_FRAMES == 0:
-                try:
-                    dets = detect_cards(frame)
-                    scanner_state.pop('detect_error', None)
-                except Exception as e:
-                    dets = []
-                    scanner_state['detect_error'] = str(e)
-            frame_i += 1
+            # Draw using last-known tracks; detector updates them asynchronously
+            out = frame.copy()
 
-            with video_lock:
-                for t in tracks.values():
-                    t['updated'] = False
-
-                for d in dets:
-                    d['centroid'] = d['box'].mean(axis=0)
-                    best_id, best_dist = None, MAX_ASSOC_DIST
-                    for tid, t in tracks.items():
-                        dist = np.hypot(*(d['centroid'] - t['centroid']))
-                        if dist < best_dist:
-                            best_dist, best_id = dist, tid
-                    if best_id is not None:
-                        t = tracks[best_id]
-                        t['box'] = (t['box'] * 0.85 + d['box'] * 0.15).astype(np.float32)
-                        t['centroid'] = t['box'].mean(axis=0)
-                        t['area'] = d.get('area', t.get('area', 0))
-                        t['seen'] = t.get('seen', 0) + 1
-                        t['missed'] = 0
-                        t['updated'] = True
-                    else:
-                        tracks[len(tracks)] = {
-                            **d,
-                            'box': d['box'].astype(np.float32),
-                            'centroid': d['box'].mean(axis=0),
-                            'area': d.get('area', 0),
-                            'seen': 1,
-                            'missed': 0,
-                            'updated': True
-                        }
-
-                for tid in [tid for tid, t in list(tracks.items()) if not t['updated']]:
-                    t = tracks[tid]
-                    t['missed'] = t.get('missed', 0) + 1
-                    if t['missed'] > STALE_FRAMES:
-                        del tracks[tid]
-
-                out = frame.copy()
-                locked = next((t for t in tracks.values() if t.get('seen', 0) >= CONFIRM_FRAMES), None)
+            # Compute lock purely for overlay; state is set by detector
+            try:
+                with tracks_lock:
+                    locked = next((t for t in tracks.values() if t.get('seen', 0) >= CONFIRM_FRAMES), None)
                 if locked:
-                    current_card_crop = warp_card(frame, locked['box'])
-                    steady = locked.get('seen', 0) >= STEADY_MIN_FRAMES
-                    scanner_state.update({
-                        'locked': True,
-                        'locked_frames': locked['seen'],
-                        'locked_area': locked['area'],
-                        'steady': steady
-                    })
-                    # PERF: throttle foil detection to reduce per-frame cost
-                    if FOIL_DETECT and (frame_i % max(1, int(FOIL_EVERY_N_FRAMES)) == 0):
-                        try:
-                            isf, score = _detect_foil_card(current_card_crop)
-                            prev = float(scanner_state.get("foil_score", 0.0))
-                            sm = 0.7 * prev + 0.3 * score if prev else score
-                            was = bool(scanner_state.get("foil", False))
-                            now = (sm >= FOIL_ON_TH) or (was and sm >= FOIL_OFF_TH)
-                            scanner_state.update({"foil": now, "foil_score": round(sm, 2)})
-                        except Exception:
-                            pass
-                    elif not FOIL_DETECT:
-                        scanner_state.pop("foil", None)
-                        scanner_state.pop("foil_score", None)
                     cv2.polylines(out, [locked['box'].astype(int)], True, (0, 255, 0), 2)
-                else:
-                    current_card_crop = None
-                    scanner_state.update({'locked': False, 'locked_frames': 0, 'steady': False})
+            except Exception:
+                pass
 
-                output_frame = out
+            output_frame = out
     finally:
         if cap:
             cap.release()
             print("Camera released.")
 
+
+def detect_worker():
+    """Run card detection/tracking on the latest frame without ever blocking capture/preview.
+    Throttled to DETECT_MAX_FPS and skips work while PROC_PAUSED is active.
+    Updates: tracks (with tracks_lock), current_card_crop, scanner_state.
+    """
+    global _last_detect_ts, current_card_crop, scanner_state
+    # Initialize the local ROI version we've seen so far
+    with _detect_roi_lock:
+        roi_ver_seen = _detect_roi_version
+
+    frame_i = 0
+    while not shutdown_evt.is_set():
+        # pacing: time-gate
+        now = time.time()
+        min_dt = 1.0 / max(1, int(DETECT_MAX_FPS))
+        if (now - _last_detect_ts) < min_dt:
+            time.sleep(0.001)
+            continue
+
+        if PROC_PAUSED:
+            time.sleep(0.02)
+            continue
+
+        # get latest frame if available
+        if not _frame_q:
+            time.sleep(0.005)
+            continue
+        frame = _frame_q[-1]
+        _last_detect_ts = time.time()
+
+        # ROI changes: reset tracks + state
+        with _detect_roi_lock:
+            rv = _detect_roi_version
+        if rv != roi_ver_seen:
+            with tracks_lock:
+                tracks.clear()
+            with video_lock:
+                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False})
+                current_card_crop = None
+            roi_ver_seen = rv
+
+        # run detection (respect existing cadence param too)
+        dets = []
+        try:
+            # Optionally skip based on DETECT_EVERY_N_FRAMES count
+            if (frame_i % max(1, int(DETECT_EVERY_N_FRAMES))) == 0:
+                dets = detect_cards(frame)
+                # clear last detect error if any
+                scanner_state.pop('detect_error', None)
+        except Exception as e:
+            dets = []
+            scanner_state['detect_error'] = str(e)
+
+        # Associate to tracks
+        with tracks_lock:
+            for _, t in tracks.items():
+                t['updated'] = False
+
+            for d in dets:
+                d['centroid'] = d['box'].mean(axis=0)
+                best_id, best_dist = None, MAX_ASSOC_DIST
+                for tid, t in list(tracks.items()):
+                    dist = float(np.hypot(*(d['centroid'] - t['centroid'])))
+                    if dist < best_dist:
+                        best_dist, best_id = dist, tid
+                if best_id is not None:
+                    t = tracks[best_id]
+                    t['box'] = (t['box'] * 0.85 + d['box'] * 0.15).astype(np.float32)
+                    t['centroid'] = t['box'].mean(axis=0)
+                    t['area'] = d.get('area', t.get('area', 0))
+                    t['seen'] = t.get('seen', 0) + 1
+                    t['missed'] = 0
+                    t['updated'] = True
+                else:
+                    tracks[len(tracks)] = {
+                        **d,
+                        'box': d['box'].astype(np.float32),
+                        'centroid': d['box'].mean(axis=0),
+                        'area': d.get('area', 0),
+                        'seen': 1,
+                        'missed': 0,
+                        'updated': True
+                    }
+
+            # drop stale
+            stale_ids = [tid for tid, t in list(tracks.items()) if not t['updated']]
+            for tid in stale_ids:
+                t = tracks.get(tid)
+                if not t:
+                    continue
+                t['missed'] = t.get('missed', 0) + 1
+                if t['missed'] > STALE_FRAMES:
+                    del tracks[tid]
+
+            # Find locked
+            locked = next((t for t in tracks.values() if t.get('seen', 0) >= CONFIRM_FRAMES), None)
+
+        # Update crop + scanner state
+        if locked is not None:
+            try:
+                crop = warp_card(frame, locked['box'])
+            except Exception:
+                crop = None
+            with video_lock:
+                current_card_crop = crop
+                steady = locked.get('seen', 0) >= STEADY_MIN_FRAMES
+                scanner_state.update({
+                    'locked': True,
+                    'locked_frames': locked.get('seen', 0),
+                    'locked_area': locked.get('area', 0.0),
+                    'steady': steady
+                })
+
+            # Update YOLOv5 ROI detector (throttled)
+            try:
+                if _ai_enabled() and crop is not None:
+                    ai_every = int(globals().get('DETECT_AI_EVERY_N_FRAMES', 3)) or 3
+                    if (frame_i % ai_every) == 0:
+                        _update_ai_rois(crop)
+            except Exception:
+                pass
+            # optional foil detection (throttled)
+            if FOIL_DETECT and (frame_i % max(1, int(FOIL_EVERY_N_FRAMES)) == 0) and crop is not None:
+                try:
+                    isf, score = _detect_foil_card(crop)
+                    prev = float(scanner_state.get("foil_score", 0.0))
+                    sm = 0.7 * prev + 0.3 * score if prev else score
+                    was = bool(scanner_state.get("foil", False))
+                    nowf = (sm >= FOIL_ON_TH) or (was and sm >= FOIL_OFF_TH)
+                    scanner_state.update({"foil": nowf, "foil_score": round(sm, 2)})
+                except Exception:
+                    pass
+            elif not FOIL_DETECT:
+                scanner_state.pop("foil", None)
+                scanner_state.pop("foil_score", None)
+        else:
+            with video_lock:
+                current_card_crop = None
+                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0.0, 'steady': False})
+
+        frame_i += 1
 def ocr_worker():
     _get_rapid_engine()
     last_hash = None
@@ -2275,13 +3201,13 @@ def _send_gcode(script, timeout=None):
     try:
         s = (script or "").strip().upper()
         long = s.startswith(("G28", "RUN_SORTER_INTERACTIVE", "SORTER_HOME", "SORTER_CYCLE_INTERACTIVE", "MOVE_TO_SCAN", "PICKUP_CARD"))
-        to = timeout if timeout is not None else (120 if long else 30)
+        to = timeout if timeout is not None else (120 if long else 60)
         _HTTP.post(HTTP_POST_URL, json={"script": script}, timeout=to)
     except Exception as e:
         _dbg("WEBSOCKET ERROR", f"gcode post failed: {e}")
 
 def _send_ack_ok(job): _send_gcode(f"M118 ACK_OK job={job}")
-def _send_scan_ok(job): _send_gcode("SCAN_OK")
+def _send_scan_ok(job): _send_gcode(f"SCAN_OK job={int(job or 0)}")
 def _send_scan_fail(job): _send_gcode("SCAN_FAIL")
 
 def _parse_ready_line(line):
@@ -2308,23 +3234,45 @@ def ws_thread():
         if method == "notify_gcode_response" and params:
             line = str(params[0]).strip()
             if "READY_TO_SCAN" in line:
+                global PROC_PAUSED, PROC_PAUSE_SEQ, scanned_card
+                global PROC_PAUSED, PROC_PAUSE_SEQ, scanned_card
                 job = _parse_ready_line(line)
                 if job is None: return
                 with printer_lock:
                     printer_state["last_ready_line"] = line
                     printer_state["awaiting"] = True
                     printer_state["job_id"] = job
-                    seen = printer_state["ack_ok_jobs"]
-                    if job not in seen:
-                        seen.add(job)
-                        _send_ack_ok(job)
-                        _dbg("WEBSOCKET", f"READY_TO_SCAN -> ACK_OK (job={job})")
-
-                # Auto-pause streams while the printer requests a scan
+                    _send_ack_ok(job)
+                    _dbg("WEBSOCKET", f"READY_TO_SCAN -> ACK_OK (job={job})")
+# Auto-pause streams while the printer requests a scan
                 STREAM_STATE['paused'] = True
                 STREAM_STATE['paused_reason'] = f'ready_to_scan job={job}'
+                PROC_PAUSED = False
+                PROC_PAUSE_SEQ = None
+                with scan_lock:
+                    scanned_card = None
+                try:
+                    _clear_ocr()
+                except Exception:
+                    pass
+                with printer_lock:
+                    printer_state['scan_captured'] = False
+                PROC_PAUSED = False
+                PROC_PAUSE_SEQ = None
+                with scan_lock:
+                    scanned_card = None
+                try:
+                    _clear_ocr()
+                except Exception:
+                    pass
             elif "ACK_SCAN_OK" in line:
-                _dbg("WEBSOCKET", f"Printer ACKed SCAN_OK {line}")
+                m = re.search(r"ACK_SCAN_OK\s+job=(\d+)", line)
+                ack_job = int(m.group(1)) if m else None
+                with printer_lock:
+                    printer_state["ack_received_at"] = time.time()
+                    printer_state["last_ack_job"] = ack_job
+                _dbg("WEBSOCKET", f"Printer ACKed SCAN_OK echo: {line}")
+                _post_job_cleanup(printer_state.get('last_ack_job'))
             elif "ACK_SCAN_FAIL" in line:
                 _dbg("WEBSOCKET", f"Printer ACKed SCAN_FAIL {line}")
     def on_close(ws, code, reason):
@@ -2360,17 +3308,42 @@ def autoscan_manager():
         if not pending:
             continue
 
-        # 2) Wait until the card is steady
+        job_for_cycle = int(job or 0)
+
+        # 2) Wait until the card is steady with grace + watchdog
+        GRACE = float(globals().get("STEADY_GRACE_S", 2.5))
+        WATCHDOG = float(globals().get("STEADY_WATCHDOG_S", 6.0))
+        t_grace = time.time()
+        steady = False
+        _dbg("AUTOSCAN", f"waiting for steady: grace={GRACE:.1f}s watchdog={WATCHDOG:.1f}s (job={job})")
+        # Grace period: wait quietly for steady
         while not shutdown_evt.is_set():
             with video_lock:
                 steady = bool(scanner_state.get("steady", False))
             if steady:
                 break
+            if time.time() - t_grace >= GRACE:
+                break
             time.sleep(0.02)
-
-        # 3) Small grace period then capture a snapshot
+        # After grace, enforce a bounded watchdog window
+        if not steady:
+            t_watch = time.time()
+            while not shutdown_evt.is_set():
+                with video_lock:
+                    steady = bool(scanner_state.get("steady", False))
+                if steady:
+                    break
+                if time.time() - t_watch > WATCHDOG:
+                    _dbg("AUTO-WATCHDOG", f"still not steady after {GRACE+WATCHDOG:.1f}s → extending wait (job={job})")
+                    t_watch = time.time()
+                    continue
+                time.sleep(0.02)
+                # 3) Small grace period then capture a snapshot
+                #_dbg("AUTOSCAN", f"steady={steady} → capturing in {AUTO_CAPTURE_WAIT_S:.2f}s (job={job})")
+                #_dbg("AUTOSCAN", f"state: awaiting={pending} locked={scanner_state.get('locked', False)} steady_frames={scanner_state.get('locked_frames',0)}")
         time.sleep(AUTO_CAPTURE_WAIT_S)
         ok = capture_scanned_card_from_live()
+
         with scan_lock:
             cur_seq = snapshot_seq
         
@@ -2405,13 +3378,23 @@ def autoscan_manager():
         if choice is None and (nm or cn_raw):
             try:
                 # First try with OCR’s set hint (if any)…
+                # If set hint is missing and we have a detected set-icon, infer it now
+                try:
+                    if not shint:
+                        with scan_lock:
+                            _img_for_icon = scanned_card.copy() if scanned_card is not None else None
+                        if _img_for_icon is not None:
+                            _code,_sc = _match_set_symbol_to_code(_img_for_icon, name_hint=nm)
+                            if _code:
+                                shint = _code
+                except Exception:
+                    pass
                 choice = _scryfall_lookup_once(nm, cn_raw, shint, cur_seq)
                 # …then fall back to no set constraint
                 if choice is None and shint:
                     choice = _scryfall_lookup_once(nm, cn_raw, "", cur_seq)
             except Exception:
                 choice = None
-
         # 7) Grab snapshot & Scryfall image (cache is warmed by cardinfo_worker when possible)
         with scan_lock:
             snap_img = scanned_card.copy() if scanned_card is not None else None
@@ -2435,7 +3418,40 @@ def autoscan_manager():
 
 
         visual_ready = (choice is not None and snap_img is not None and scry_img is not None)
-        flagged = (not visual_ready) or (not match_ok)
+        
+        # Evaluate flagging according to your rules:
+        # - Flag if Scryfall was queried without ALL THREE inputs (name, set, collector number)
+        # - If all three are present, only flag when the visual comparison fails
+        # - Also flag if we couldn't render the visual compare (missing images)
+        has_name = bool(nm and nm.strip())
+        has_set  = bool(shint and str(shint).strip())
+        try:
+            _cn_norm_for_flag = _parse_collector_for_display(cn_raw or "")
+        except Exception:
+            _cn_norm_for_flag = (cn_raw or "").strip()
+        has_cn   = bool(_cn_norm_for_flag)
+
+        has_all_three = has_name and has_set and has_cn
+        visual_ready = (choice is not None and snap_img is not None and scry_img is not None)
+        flagged_missing_inputs = not has_all_three
+        flagged_visual_fail    = (has_all_three and not match_ok)
+        flagged_images_missing = not visual_ready
+
+        flagged = bool(flagged_missing_inputs or flagged_visual_fail or flagged_images_missing)
+
+        if flagged_missing_inputs:
+            missing = []
+            if not has_name: missing.append("name")
+            if not has_set:  missing.append("set")
+            if not has_cn:   missing.append("card number")
+            _dbg("COMPARE", f"FLAGGED (missing inputs: {', '.join(missing)}) job={job}")
+        elif flagged_images_missing:
+            _dbg("COMPARE", f"FLAGGED (no Scryfall image or snapshot) job={job}")
+        elif flagged_visual_fail:
+            _dbg("COMPARE", f"FLAGGED job={job} score={match_score:.3f} (visual threshold {MATCH_TH})")
+        else:
+            _dbg("COMPARE", f"VISUAL MATCH job={job} score={match_score:.3f} (>= {MATCH_TH})")
+
 
         if not visual_ready:
             _dbg("COMPARE", f"FLAGGED (no Scryfall image or snapshot) job={job}")
@@ -2484,36 +3500,47 @@ def autoscan_manager():
 
         # 11) Notify printer
         if ALWAYS_SCAN_OK or not flagged:
-            _send_scan_ok(job or 0)
-            _dbg("WEBSOCKET", f"Sent SCAN_OK (job={job})")
+            _send_scan_ok(job_for_cycle)
+            _dbg("WEBSOCKET", f"Sent SCAN_OK (job={job_for_cycle})")
             STREAM_STATE['paused'] = False
             STREAM_STATE['paused_reason'] = ''
             with printer_lock:
                 printer_state["last_decision"] = "SCAN_OK (flagged)" if flagged else "SCAN_OK"
         else:
-            _send_scan_fail(job or 0)
-            _dbg("WEBSOCKET", f"Sent SCAN_FAIL (job={job})")
+            _send_scan_fail(job_for_cycle)
+            _dbg("WEBSOCKET", f"Sent SCAN_FAIL (job={job_for_cycle})")
             with printer_lock:
                 printer_state["last_decision"] = "SCAN_FAIL"
 
-        # 12) Clear pending flag for this job
-        with printer_lock:
-            printer_state["awaiting"] = False
+        # 12) (moved) Cleanup happens on ACK; do not clear awaiting here.
 
 # =========================
 #MARK: STREAM / UI
 # =========================
+
 def _draw_ocr_debug_boxes(img):
-    h,w = img.shape[:2]
-    def draw(roi,c,th=2):
-        x0=int(roi[0]*w); y0=int(roi[1]*h); x1=int(roi[2]*w); y1=int(roi[3]*h)
-        cv2.rectangle(img,(x0,y0),(x1,y1),c,th)
-    draw(ROI_TITLE_TOP,(0,255,0))
-    draw(ROI_TITLE_ALT,(0,200,255))
-    draw(ROI_NUMBER_MAIN,(220,120,255))
-    draw(ROI_NUMBER_WIDE,(160,80,255))
-    draw(ROI_NUMBER_TALL,(200,60,255))
-    draw(ROI_NUMBER_NARROW,(255,80,120))
+    """Draw what the AI sees (detected ROI boxes). If AI is off/unavailable, draw legacy ROIs."""
+    if globals().get("SHOW_ROI_OVERLAY", False) and _ai_enabled():
+        try:
+            _draw_ai_overlay(img)
+            return
+        except Exception as e:
+            _dbg("AI OVERLAY ERROR", f"{e}")
+    # Fallback: legacy static ROIs
+    h, w = img.shape[:2]
+    def draw(roi, c, th=2):
+        x0 = int(roi[0]*w); y0 = int(roi[1]*h); x1 = int(roi[2]*w); y1 = int(roi[3]*h)
+        cv2.rectangle(img, (x0, y0), (x1, y1), c, th)
+    try:
+        draw(ROI_TITLE_TOP, (0,255,0))
+        draw(ROI_TITLE_ALT, (0,200,255))
+        draw(ROI_NUMBER_MAIN, (220,120,255))
+        draw(ROI_NUMBER_WIDE, (160,80,255))
+        draw(ROI_NUMBER_TALL, (200,60,255))
+        draw(ROI_NUMBER_NARROW, (255,80,120))
+    except Exception:
+        pass
+
 
 def _stream_frames(kind='card'):
     while not shutdown_evt.is_set():
@@ -2609,10 +3636,10 @@ def compare_jpg():
 # UI file routes
 # ---------------------------
 
+
 @app.get("/api/logs")
 def api_logs():
-    """
-    Poll console logs.
+    """Poll console logs.
     Query params:
       after=<id>  return lines with id > after (default 0)
       limit=<n>   max lines to return (1..1000, default 200)
@@ -2633,15 +3660,24 @@ def api_logs():
 
     out = []
     for e in items:
+        sev = e.get("sev")
+        if not sev:
+            try:
+                lvl_i = int(e.get("lvl", 1))
+            except Exception:
+                lvl_i = 1
+            sev = {0:"ok", 1:"info", 2:"info", 3:"warn", 4:"err"}.get(lvl_i, "info")
         out.append({
             "id":   int(e["id"]),
             "ts":   float(e["ts"]),
             "tag":  e["tag"],
             "msg":  e["msg"],
-            "lvl":  int(e.get("lvl", 1)),   # <— add this
+            "lvl":  int(e.get("lvl", 1)),
+            "sev":  sev,
             "line": f"[{e['tag']}] {e['msg']}",
         })
     return jsonify({"ok": True, "items": out, "next": int(nxt)})
+
 
 
 @app.post("/api/logs/clear")
@@ -2747,6 +3783,38 @@ def api_state():
 
 # =========================
 #MARK: DETECTION ROI (UI <-> server)
+
+def _post_job_cleanup(job=None):
+    # Make the app ready for the next scan cycle.
+    try:
+        with printer_lock:
+            cur = printer_state.get('job_id')
+            if job is None or cur == job:
+                printer_state['awaiting'] = False
+                printer_state['job_id'] = None
+        with video_lock:
+            scanner_state['steady'] = False
+        STREAM_STATE['paused'] = False
+        STREAM_STATE['paused_reason'] = None
+        try:
+            with scan_lock:
+                globals().get('scanned_card')
+                # reset only if defined
+                scanned_card = None
+        except Exception:
+            pass
+        try:
+            _clear_ocr()
+        except Exception:
+            pass
+        try:
+            printer_state.get('ack_ok_jobs', set()).discard(job)
+        except Exception:
+            pass
+        _dbg('AUTOSCAN', f'post_job_cleanup done (job={job})')
+    except Exception as e:
+        _dbg('AUTOSCAN', f'post_job_cleanup error: {e}')
+
 # =========================
 # Normalized ROI in [0,1] coords: [x0, y0, x1, y1]
 DETECT_ROI = [0.0, 0.0, 1.0, 1.0]
@@ -3430,7 +4498,13 @@ def _effective_settings():
         "HISTORY_DIR": HISTORY_DIR, "HISTORY_IMG_DIR": HISTORY_IMG_DIR,
         "HISTORY_JSON_EXT": HISTORY_JSON_EXT, "JPEG_QUALITY_SNAP": JPEG_QUALITY_SNAP,
         "JPEG_QUALITY_CMP": JPEG_QUALITY_CMP, "JPEG_QUALITY_THUMB": JPEG_QUALITY_THUMB,
-        # Server
+        
+        # AI / YOLOv5
+        "AI_ENABLED": AI_ENABLED, "AI_USE_FOR_CARDS": AI_USE_FOR_CARDS, "AI_USE_FOR_ROIS": AI_USE_FOR_ROIS,
+        "AI_ONLY_MODE": AI_ONLY_MODE, "AI_MODEL_PATH": AI_MODEL_PATH, "YOLOV5_DIR": YOLOV5_DIR,
+        "AI_IMG_SIZE": AI_IMG_SIZE, "AI_CONF_THRES": AI_CONF_THRES, "AI_IOU_THRES": AI_IOU_THRES,
+        "AI_CLASS_NAMES": AI_CLASS_NAMES,
+# Server
         "HOST": HOST, "PORT": PORT,
     }
 
@@ -3502,8 +4576,18 @@ def api_scan_edit(sid):
     if scry_id:
         choice = _scryfall_request(f"https://api.scryfall.com/cards/{scry_id}") or None
     if choice is None:
-        choice = _scryfall_lookup(target.get("name",""), target.get("number_raw",""), set_hint=set_hint or target.get("set_hint",""))
-    target["scry"] = choice
+        choice = _scryfall_lookup(
+            target.get("name",""),
+            target.get("number_raw",""),
+            set_hint=set_hint or target.get("set_hint","")
+        )
+        choice = _scry_fix_mismatch(
+            choice,
+            target.get("name",""),
+            target.get("number_raw",""),
+            set_hint or target.get("set_hint","")
+        )
+        target["scry"] = choice
     snap = _decode_jpg(target.get("snap_jpg"))
     score, ok, details = 0.0, False, None
     if snap is not None and choice:
@@ -3901,6 +4985,19 @@ def _load_scryfall_catalogs_bg():
     except Exception as e:
         _dbg("SCRYFALL DATA ERROR", f"load failed: {e}")
 
+
+# --- Ensure Scryfall warm-up runs only once ---
+_scry_warmup_once = {"started": False}
+
+def _start_scry_warmup_once():
+    global _scry_warmup_once
+    if not _scry_warmup_once.get("started", False):
+        _scry_warmup_once["started"] = True
+        try:
+            _start_scry_warmup_once()
+        except Exception as _e:
+            _dbg("SCRYFALL DATA", f"Warm-up not started: {_e}")
+    return _scry_warmup_once["started"]
 # Ensure any Scryfall choice we resolve helps future DFC lookups
 # (Monkey-patch the resolver return path to index faces.)
 _orig__scryfall_lookup = _scryfall_lookup
@@ -3951,6 +5048,7 @@ def _start_workers():
     threading.Thread(target=_load_scryfall_catalogs_bg, daemon=True).start()
 
     # Fire up all workers
+    threading.Thread(target=detect_worker,   daemon=True).start()
     threading.Thread(target=video_thread,     daemon=True).start()
     threading.Thread(target=ocr_worker,       daemon=True).start()
     threading.Thread(target=cardinfo_worker,  daemon=True).start()
@@ -4225,6 +5323,14 @@ def run_server(host: str, port: int):
         except Exception:
             pass
         time.sleep(0.2)
+
+
+# --- start Scryfall warm-up on import ---
+try:
+    _start_scry_warmup_once()
+except Exception as _e:
+    _dbg("SCRYFALL DATA", f"Warm-up not started: {_e}")
+# --- end warm-up ---
 
 if __name__ == "__main__":
     HOST = str(globals().get("APP_HOST", os.environ.get("APP_HOST", "0.0.0.0")))

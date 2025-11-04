@@ -312,8 +312,7 @@ button.danger { background: #3a2430; border-color: #5a3242; }
 
 .subline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .tag {
-  display: inline-flex; align-items: center; padding: 4px 8px;
-  border-radius: 999px; background: #1b1f2a; border: 1px solid #2a3140; font-size: 12px;
+  display: inline-flex; align-items: center; font-size: 12px;
 }
 .seticon {
   width: 26px; height: 26px; display: inline-block; padding: 2px; border-radius: 6px;
@@ -389,8 +388,21 @@ button.danger { background: #3a2430; border-color: #5a3242; }
   padding: 8px; margin: 0; font: 12px/1.3 ui-monospace, Menlo, Consolas, monospace;
   overflow: auto; white-space: pre-wrap;
 }
+/* Console tag severity colors and layout fixes */
+.consolebox .tag { font-weight: 600; }
+.consolebox .tag-ok   { color: var(--ok-fg); }
+.consolebox .tag-info { color: #9bb8ff; }
+.consolebox .tag-warn { color: var(--wr-fg); }
+.consolebox .tag-err  { color: var(--bd-fg); }
+
+/* Robust scroll area for console */
+#status .console-wrap { display:flex; flex-direction:column; gap:8px; flex:1 1 auto; min-height:0; }
+#status #consoleBox { flex:1 1 auto; min-height:0; overflow:auto; position:relative; z-index:0; }
+#status .console-wrap .toolbar { position: static; z-index:1; } /* normal flow; no overlay */
+
+
 .consolebox .t { color: #a9adba; }
-.consolebox .g { color: #7bc1ff; }
+.consolebox .g { color: #cdd3df; }
 
 .panel.crop .media-wrap { aspect-ratio: 63 / 88; }
 

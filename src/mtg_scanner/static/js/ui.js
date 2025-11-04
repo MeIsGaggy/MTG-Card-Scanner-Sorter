@@ -145,17 +145,13 @@ function esc(s){
 function appendLogLine(e){
   if (!consoleBox) return;
   const nearBottom = (consoleBox.scrollTop + consoleBox.clientHeight) >= (consoleBox.scrollHeight - 8);
-
   const t = new Date((e.ts || 0)*1000).toLocaleTimeString();
   const lvl = (typeof e.lvl === "number") ? e.lvl : 1;
-  const map = {0:["ok","OK"], 1:["info","INFO"], 2:["debug","DEBUG"], 3:["warn","WARN"], 4:["err","ERROR"]};
-  const [cls, label] = map[lvl] || map[1];
-
+  const sev = (e.sev) ? String(e.sev) : ({0:'ok',1:'info',2:'info',3:'warn',4:'err'}[lvl] || 'info');
   const html =
     `<span class="t">${esc(t)}</span> ` +
-    `<span class="sev sev-${cls}">${label}</span> ` +
-    `<span class="g">[${esc(e.tag)}]</span> ${esc(e.msg)}\n`;
-
+    `<span class="tag tag-${sev}">[${esc(e.tag)}]</span> ${esc(e.msg)}
+`;
   consoleBox.insertAdjacentHTML('beforeend', html);
   if (nearBottom) consoleBox.scrollTop = consoleBox.scrollHeight;
 }
@@ -555,18 +551,6 @@ const SETTINGS_SCHEMA = [
     ]
   },
   {
-    title: "ROIs (relative 0–1)",
-    items: [
-      {k:"ROI_TITLE_TOP",   label:"Title band (top)", type:"roi"},
-      {k:"ROI_TITLE_ALT",   label:"Title band (alt)", type:"roi"},
-      {k:"ROI_NUMBER_MAIN",   label:"Number main", type:"roi"},
-      {k:"ROI_NUMBER_WIDE",   label:"Number wide", type:"roi"},
-      {k:"ROI_NUMBER_TALL",   label:"Number tall", type:"roi"},
-      {k:"ROI_NUMBER_NARROW", label:"Number narrow", type:"roi"},
-      {k:"ROI_ART",         label:"Art box", type:"roi"},
-    ]
-  },
-  {
     title: "Debug & Paths",
     items: [
       {k:"DEBUG_LEVEL", label:"Debug level", type:"int"},
@@ -794,7 +778,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
               (it.scry_set ? ('<span>' + String(it.scry_set).toUpperCase() + " " + (it.scry_cn || "") + "</span>") : "") +
               (it.scry_name ? ('<span>→ ' + it.scry_name + "</span>") : "") +
               (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length
-                ? '<span class="pill warn" title="' + it.review_reasons.join(' • ').replace(/"/g,'&quot;') + '">Review Reason</span>'
+                ? '<span class="pill warn" title="' + it.review_reasons.join(' • ').replace(/"/g,'&quot;') + '">Review Req.</span>'
                 : "") +
             "</div>" +
           "</div>" +

@@ -8,3 +8,13 @@ dist/
 .venv
 .DS_Store
 .idea/
+history/
+exports/
+MagicVisionDataset/
+src/mtg_scanner/app.py.bak
+src/mtg_scanner/settings.json
+src/settings.json
+src/.scry_img_cache/
+src/history
+yolov5/
+src/cache
