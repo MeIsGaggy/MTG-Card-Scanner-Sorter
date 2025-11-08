@@ -102,6 +102,19 @@ USE_OPENCL              = globals().get("USE_OPENCL", True)
 # PERF: new runtime tuning knobs (can be overridden in config.py)
 LIVE_OCR_ONLY_WHEN_STEADY = globals().get("LIVE_OCR_ONLY_WHEN_STEADY", True)  # only OCR live frames when steady
 LIVE_OCR_MIN_INTERVAL     = globals().get("LIVE_OCR_MIN_INTERVAL", 0.35)      # seconds between live OCR passes
+FAST_OCR_MODE            = globals().get("FAST_OCR_MODE", True)
+
+if FAST_OCR_MODE:
+    _dbg("PERF TUNING", "FAST_OCR_MODE enabled: faster OCR with possible accuracy tradeoffs")
+
+def _fast_mode() -> bool:
+    """Read runtime fast OCR mode from saved settings (fallback to global)."""
+    try:
+        cur = _settings_load() or {}
+        return bool(cur.get("FAST_OCR_MODE", FAST_OCR_MODE))
+    except Exception:
+        return bool(FAST_OCR_MODE)
+
 FOIL_EVERY_N_FRAMES       = globals().get("FOIL_EVERY_N_FRAMES", 30)           # compute foil detection every N frames
 
 try:
@@ -959,6 +972,56 @@ def _prep_roi_for_ocr(roi_bgr):
     blurred = cv2.GaussianBlur(g, (0,0), 3)
     sharpened = cv2.addWeighted(g, 1.5, blurred, -0.5, 0)
     return cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4)
+
+def _fast_read_set_hint(roi_bgr):
+    try:
+        if roi_bgr is None or roi_bgr.size == 0:
+            return ""
+        g = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        raw = ""
+        try:
+            import pytesseract
+            cfg = '--oem 1 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ -c load_system_dawg=0 -c load_freq_dawg=0'
+            raw = pytesseract.image_to_string(b, config=cfg, lang='eng') or ""
+        except Exception:
+            pass
+        m = re.search(r'\b([A-Z]{3})\b', (raw or '').upper())
+        return (m.group(1).lower() if m else "")
+    except Exception:
+        return ""
+
+
+def _fast_read_number(roi_bgr):
+    try:
+        if roi_bgr is None or roi_bgr.size == 0:
+            return "", 0.0
+        g = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        raw = ""
+        try:
+            import pytesseract
+            cfg = '--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789/ -c classify_bln_numeric_mode=1 -c load_system_dawg=0 -c load_freq_dawg=0'
+            raw = pytesseract.image_to_string(b, config=cfg, lang='eng') or ""
+        except Exception:
+            pass
+        # prefer digits before '/', else any 2-4 digit group
+        raw_up = (raw or '').strip()
+        m = re.search(r'(\d{1,4})\s*/', raw_up)
+        if not m:
+            m = re.search(r'\b(\d{2,4})\b', raw_up)
+        if m:
+            try:
+                n = str(int(m.group(1)))
+            except Exception:
+                n = m.group(1).lstrip('0') or m.group(1)
+            return n, 60.0
+        return "", 0.0
+    except Exception:
+        return "", 0.0
+
 
 def _read_text_general(bin_img):
     inverted = 255 - bin_img
@@ -3089,6 +3152,7 @@ def ocr_worker():
             snap_seq = None
             with ocr_lock:
                 snap_seq = ocr_state.get("seq")
+            number     = (ocr_state.get("number") or "").strip()
             if PROC_PAUSED and (PROC_PAUSE_SEQ is not None) and (snap_seq == PROC_PAUSE_SEQ):
                 PROC_PAUSED = False
                 PROC_PAUSE_SEQ = None
@@ -3138,6 +3202,20 @@ def cardinfo_worker():
         # Only work once per OCR update; require at least name or number
         if not (name or number_raw) or updated_at == cardinfo_state.get("last_updated", 0):
             continue
+        # FAST set+number lookup (most restrictive, fastest)
+        if _fast_mode() and name and (number_raw or number) and set_hint:
+            try:
+                _old_timeout = globals().get("SCRYFALL_TIMEOUT", 4.0)
+                globals()["SCRYFALL_TIMEOUT"] = float(FAST_SCRY_TIMEOUT)
+                choice = _scryfall_lookup_once(name, number_raw or number, set_hint, seq)
+            except Exception:
+                choice = None
+            finally:
+                globals()["SCRYFALL_TIMEOUT"] = _old_timeout
+            if choice is not None:
+                _set_choice(choice, seq)
+                cardinfo_state["last_updated"] = updated_at
+                continue
 
         key = (name, number_raw, set_hint, seq)
         if key == last_key:
@@ -3245,7 +3323,7 @@ def ws_thread():
                     _send_ack_ok(job)
                     _dbg("WEBSOCKET", f"READY_TO_SCAN -> ACK_OK (job={job})")
 # Auto-pause streams while the printer requests a scan
-                STREAM_STATE['paused'] = True
+                STREAM_STATE['paused'] = False
                 STREAM_STATE['paused_reason'] = f'ready_to_scan job={job}'
                 PROC_PAUSED = False
                 PROC_PAUSE_SEQ = None
@@ -3325,6 +3403,9 @@ def autoscan_manager():
             if time.time() - t_grace >= GRACE:
                 break
             time.sleep(0.02)
+            with printer_lock:
+                if not printer_state.get("awaiting", False):
+                    break
         # After grace, enforce a bounded watchdog window
         if not steady:
             t_watch = time.time()
@@ -3337,6 +3418,9 @@ def autoscan_manager():
                     _dbg("AUTO-WATCHDOG", f"still not steady after {GRACE+WATCHDOG:.1f}s → extending wait (job={job})")
                     t_watch = time.time()
                     continue
+                with printer_lock:
+                    if not printer_state.get("awaiting", False):
+                        break
                 time.sleep(0.02)
                 # 3) Small grace period then capture a snapshot
                 #_dbg("AUTOSCAN", f"steady={steady} → capturing in {AUTO_CAPTURE_WAIT_S:.2f}s (job={job})")
@@ -3502,6 +3586,12 @@ def autoscan_manager():
         if ALWAYS_SCAN_OK or not flagged:
             _send_scan_ok(job_for_cycle)
             _dbg("WEBSOCKET", f"Sent SCAN_OK (job={job_for_cycle})")
+            # Fallback cleanup if printer won't ACK
+            if not bool(globals().get('REQUIRE_PRINTER_ACK', True)):
+                try:
+                    _post_job_cleanup(job_for_cycle)
+                except Exception as _e:
+                    _dbg('AUTOSCAN', f'post_job_cleanup (no-ack OK) error: {_e}', level=2)
             STREAM_STATE['paused'] = False
             STREAM_STATE['paused_reason'] = ''
             with printer_lock:
@@ -3509,6 +3599,12 @@ def autoscan_manager():
         else:
             _send_scan_fail(job_for_cycle)
             _dbg("WEBSOCKET", f"Sent SCAN_FAIL (job={job_for_cycle})")
+            # Fallback cleanup if printer won't ACK
+            if not bool(globals().get('REQUIRE_PRINTER_ACK', True)):
+                try:
+                    _post_job_cleanup(job_for_cycle)
+                except Exception as _e:
+                    _dbg('AUTOSCAN', f'post_job_cleanup (no-ack FAIL) error: {_e}', level=2)
             with printer_lock:
                 printer_state["last_decision"] = "SCAN_FAIL"
 
@@ -4092,7 +4188,7 @@ def capture_scanned_card_from_live():
         pass
 
     # Pause the outgoing stream (it will now serve the fresh cached frame)
-    STREAM_STATE['paused'] = True
+    STREAM_STATE['paused'] = False
     STREAM_STATE['paused_reason'] = f'snapshot seq={snapshot_seq}'
 
     with printer_lock:
@@ -4506,6 +4602,7 @@ def _effective_settings():
         "AI_CLASS_NAMES": AI_CLASS_NAMES,
 # Server
         "HOST": HOST, "PORT": PORT,
+        "FAST_OCR_MODE": _fast_mode()
     }
 
 @app.get("/api/settings")
@@ -4994,7 +5091,7 @@ def _start_scry_warmup_once():
     if not _scry_warmup_once.get("started", False):
         _scry_warmup_once["started"] = True
         try:
-            _start_scry_warmup_once()
+            threading.Thread(target=_load_scryfall_catalogs_bg, daemon=True).start()
         except Exception as _e:
             _dbg("SCRYFALL DATA", f"Warm-up not started: {_e}")
     return _scry_warmup_once["started"]
@@ -5331,6 +5428,197 @@ try:
 except Exception as _e:
     _dbg("SCRYFALL DATA", f"Warm-up not started: {_e}")
 # --- end warm-up ---
+# === BEGIN FAST OCR PATCH (drop-in / removable) ===
+try:
+    _FAST_CFG = {
+"FAST_PATH": bool(globals().get("OCR_FAST_PATH", True) or globals().get("FAST_OCR_MODE", False)),
+        "LAZY_SH":   bool(globals().get("OCR_LAZY_SET_HINT", True)),
+        "SINGLE":    bool(globals().get("OCR_TITLE_SINGLE_PASS", True)),
+        "USE_EASY":  bool(globals().get("OCR_USE_EASYOCR", True)),
+        "MAXW":      int(globals().get("OCR_TITLE_MAX_W", 640)),
+        "FAST_NUM":  bool(globals().get("OCR_NUMBER_FASTPATH", True)),
+        "SKIP_NUM": bool(globals().get("OCR_SKIP_NUMBER", False)),
+    }
+except Exception:
+    _FAST_CFG = {"FAST_PATH": True, "LAZY_SH": True, "SINGLE": True, "USE_EASY": False, "MAXW": 640, "FAST_NUM": True}
+
+_easy_reader_ref = {"obj": None}
+def _get_easy_reader():
+    if not _FAST_CFG.get("USE_EASY"):
+        return None
+    try:
+        if _easy_reader_ref["obj"] is None:
+            import easyocr
+            _easy_reader_ref["obj"] = easyocr.Reader(["en"], gpu=False, verbose=False)
+        return _easy_reader_ref["obj"]
+    except Exception as _e:
+        try: _dbg("EASYOCR", f"disabled (import failed: {_e})")
+        except Exception: pass
+        _FAST_CFG["USE_EASY"] = False
+        return None
+
+def _easyocr_text_from_bgr(bgr):
+    reader = _get_easy_reader()
+    if reader is None:
+        return "", 0.0
+    try:
+        import cv2 as _cv2
+        rgb = _cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB)
+        result = reader.readtext(rgb, detail=1, paragraph=False, batch_size=1)
+        if not result:
+            return "", 0.0
+        items = sorted(result, key=lambda x: (x[0][0][0] if x and x[0] else 0))
+        line = " ".join((x[1] or "").strip() for x in items if (x[1] or "").strip()).strip()
+        conf = 100.0 * max(0.0, max((float(x[2]) if len(x) > 2 else 0.0) for x in items) if items else 0.0)
+        return line, conf
+    except Exception:
+        return "", 0.0
+
+def _quick_title_from_roi(roi_bgr, foil=False):
+    if roi_bgr is None or getattr(roi_bgr, "size", 0) == 0:
+        return "", 0.0, "none"
+    try:
+        import cv2 as _cv2, numpy as _np
+        h, w = roi_bgr.shape[:2]
+        maxw = max(120, int(_FAST_CFG.get("MAXW", 640)))
+        if w > maxw:
+            scale = maxw / float(w)
+            roi_bgr = _cv2.resize(roi_bgr, (int(w*scale), int(h*scale)), interpolation=_cv2.INTER_AREA)
+        src = _enhance_for_foil(roi_bgr) if foil else roi_bgr
+        if _FAST_CFG.get("USE_EASY"):
+            t, c = _easyocr_text_from_bgr(src)
+            if t:
+                return _clean_title_text(t), c, "EasyOCR"
+        bgr = _prep_roi_for_rapid_bgr(src)
+        try:
+            eng = _get_rapid_engine()
+        except Exception:
+            eng = None
+        if eng is not None:
+            res = (eng(bgr)[0] or [])
+            if res:
+                items = [((r[0][0][0], 0.5*(r[0][0][1]+r[0][2][1])), r[1], float(r[2])*100.0) for r in res]
+                ys = [p[1] for (p, _, _) in items]
+                y0 = min(ys) if ys else 0.0
+                _box_heights = _np.array([abs(r[0][0][1]-r[0][2][1]) for r in res], dtype=float)
+                _med_h = float(_np.median(_box_heights)) if _box_heights.size else 0.0
+                top_band_h = max(_AI_TOPLINE_FRAC_MIN * bgr.shape[0], _AI_TOPLINE_MULT * _med_h)
+                top_line = sorted([it for it in items if (it[0][1] - y0) <= top_band_h], key=lambda it: it[0][0])
+                if top_line:
+                    joined = " ".join(t for _, t, _ in top_line).strip()
+                    bestc = max(c for _, _, c in top_line)
+                    return _clean_title_text(joined), bestc, "RapidOCR-topline"
+                joined2 = " ".join(t for _, t, _ in items).strip()
+                if joined2:
+                    bestc = max(c for _, _, c in items)
+                    return _clean_title_text(joined2), bestc, "RapidOCR"
+        try:
+            import pytesseract as _pt
+            bin_img = _prep_roi_for_ocr(src)
+            cfg = "--oem 3 --psm 7 -c load_system_dawg=0 -c load_freq_dawg=0"
+            t = _pt.image_to_string(255 - bin_img, config=cfg, lang="eng").strip()
+            if t:
+                return _clean_title_text(t), 40.0, "Tesseract"
+        except Exception:
+            pass
+        return "", 0.0, "none"
+    except Exception:
+        return "", 0.0, "none"
+
+try:
+    __SLOW_OCR_IMPL = _orig_ocr_from_card_upright
+except NameError:
+    __SLOW_OCR_IMPL = None
+
+def _fast_ocr_from_card_upright(img):
+    foil = False; foil_score = 0.0
+    try:
+        if globals().get("FOIL_DETECT", True):
+            foil, foil_score = _detect_foil_card(img)
+    except Exception:
+        pass
+
+    if not _FAST_CFG.get("FAST_PATH", True):
+        if __SLOW_OCR_IMPL:
+            return __SLOW_OCR_IMPL(img)
+        return {"name":"", "name_raw":"", "name_conf":0.0, "number":"", "number_raw":"", "number_conf":0.0, "set_hint":"", "foil":foil, "foil_score":foil_score}
+
+    name_txt, name_conf, name_src = "", 0.0, "none"
+    try:
+        roi_name = _ai_crop(img, "name") if _ai_enabled() else None
+        if roi_name is None or getattr(roi_name, "size", 0) == 0:
+            top = _crop_title_roi_top(img); alt = _crop_title_roi_alt(img)
+            import cv2 as _cv2
+            btop = _prep_roi_for_ocr(top); balt = _prep_roi_for_ocr(alt)
+            ink_top = float(_cv2.countNonZero(btop))/max(1, float(btop.size))
+            ink_alt = float(_cv2.countNonZero(balt))/max(1, float(balt.size))
+            roi_name = top if ink_top >= ink_alt else alt
+        name_txt, name_conf, name_src = _quick_title_from_roi(roi_name, foil=foil)
+    except Exception:
+        pass
+    try:
+        if name_txt and (name_conf < 70.0):
+            lex = _score_against_lexicon(name_txt)
+            name_conf = max(name_conf, 100.0 * float(lex))
+    except Exception:
+        pass
+
+    number_tok, number_conf = "", 0.0
+    try:
+        if _FAST_CFG.get("FAST_NUM", True):
+            band = _roi_rel(img, ROI_NUMBER_WIDE)
+            number_tok, number_conf = _fast_read_number(band)
+        if not number_tok:
+            number_tok, number_conf = _read_collector_number(img, foil=foil)
+    except Exception:
+        pass
+
+    set_hint = ""
+    if not _FAST_CFG.get("LAZY_SH", True):
+        try:
+            band = _ai_crop(img, "card") if _ai_enabled() else None
+            if band is None or getattr(band, "size", 0) == 0:
+                band = _roi_rel(img, ROI_NUMBER_WIDE)
+            set_hint = _fast_read_set_hint(band) or ""
+        except Exception:
+            set_hint = ""
+
+    if not (name_txt or number_tok):
+        if __SLOW_OCR_IMPL:
+            return __SLOW_OCR_IMPL(img)
+        return {"name":"", "name_raw":"", "name_conf":0.0, "number":"", "number_raw":"", "number_conf":0.0, "set_hint":"", "foil":foil, "foil_score":foil_score}
+
+    out = {
+        "name": "",
+        "name_raw": name_txt or "",
+        "name_conf": float(name_conf or 0.0),
+        "number": str(number_tok or ""),
+        "number_raw": str(number_tok or ""),
+        "number_conf": float(number_conf or 0.0),
+        "set_hint": set_hint or "",
+        "foil": bool(foil),
+        "foil_score": float(foil_score or 0.0),
+        "provider": "EasyOCR" if name_src.startswith("Easy") else ("RapidOCR" if "Rapid" in name_src else PRIMARY_PROVIDER_LABEL),
+    }
+    return out
+
+# Patch both names so any call hits fast path
+ocr_from_card_upright = _fast_ocr_from_card_upright
+_orig_ocr_from_card_upright = _fast_ocr_from_card_upright
+
+try:
+    _dbg("PERF TUNING", f"FAST OCR path={'on' if _FAST_CFG.get('FAST_PATH', True) else 'off'}; lazy_set_hint={'on' if _FAST_CFG.get('LAZY_SH', True) else 'off'}; easyocr={'on' if _FAST_CFG.get('USE_EASY', False) else 'off'}")
+except Exception:
+    pass
+
+# Re-arm timers now that we've patched OCR functions
+try:
+    if '_enable_perf_debug' in globals():
+        _enable_perf_debug()
+except Exception:
+    pass
+# === END FAST OCR PATCH ===
+
 
 if __name__ == "__main__":
     HOST = str(globals().get("APP_HOST", os.environ.get("APP_HOST", "0.0.0.0")))

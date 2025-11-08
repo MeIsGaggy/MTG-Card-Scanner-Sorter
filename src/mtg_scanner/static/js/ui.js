@@ -475,6 +475,7 @@ const SETTINGS_SCHEMA = [
     title: "Processing / Canvas",
     items: [
       {k:"PROC_MAX_WIDTH", label:"Processing downscale max width", type:"int"},
+      {k:"PROC_DOWNSCALE_MAX_W", label:"Detection downscale max width", type:"int"},
       {k:"CARD_W", label:"Card canvas width", type:"int"},
       {k:"CARD_H", label:"Card canvas height", type:"int"},
       {k:"MIN_CARD_AREA_RATIO", label:"Min card area ratio", type:"float"},
@@ -511,6 +512,19 @@ const SETTINGS_SCHEMA = [
       {k:"MIN_TITLE_LETTERS", label:"Min title letters", type:"int"},
       {k:"TEXT_PRESENCE_MIN", label:"Text presence min", type:"float"},
       {k:"TITLE_ALLOW_TESS_FALLBACK", label:"Allow tess fallback", type:"bool"},
+      {k:"USE_TESS_FOR_TITLES", label:"Use Tesseract for titles", type:"bool"},
+      {k:"OCR_ENABLE_BLACKHAT", label:"Enable Blackhat preproc", type:"bool"},
+    ]
+  },
+  {
+    title: "Performance / Throttling",
+    items: [
+      {k:"FAST_OCR_MODE", label:"Fast OCR mode", type:"bool"},
+      {k:"LIVE_OCR_ONLY_WHEN_STEADY", label:"Live OCR only when steady", type:"bool"},
+      {k:"LIVE_OCR_MIN_INTERVAL", label:"Live OCR min interval (s)", type:"float"},
+      {k:"FOIL_EVERY_N_FRAMES", label:"Foil detect every N frames", type:"int"},
+      {k:"USE_OPENCL", label:"Use OpenCL (if available)", type:"bool"},
+      {k:"SC_IMG_CACHE_DIR", label:"Scry image cache dir"},
     ]
   },
   {
@@ -529,10 +543,35 @@ const SETTINGS_SCHEMA = [
       {k:"MATCH_W_HASH", label:"Weight: hash", type:"float"},
       {k:"MATCH_W_HIST", label:"Weight: hist", type:"float"},
       {k:"MATCH_W_ORB",  label:"Weight: ORB",  type:"float"},
-      {k:"MATCH_TH",     label:"Match threshold", type:"float"},
+      {k:"MATCH_TH",     label:"Match pass threshold", type:"float"},
       {k:"NAME_OK_TH",   label:"Name OK threshold", type:"float"},
-      {k:"MATCH_USE_ART",label:"Compare art only", type:"bool"},
-      {k:"ALWAYS_SCAN_OK", label:"Always SCAN_OK", type:"bool"},
+      {k:"ALWAYS_SCAN_OK", label:"Mark scan OK even if match fails", type:"bool"},
+      {k:"MATCH_USE_ART",label:"Use art region for compare", type:"bool"},
+    ]
+  },
+  {
+    title: "Advanced Match (Perf)",
+    items: [
+      {k:"MATCH_ORB_FEATURES", label:"ORB features", type:"int"},
+      {k:"MATCH_FAST_ACCEPT_DELTA", label:"Fast accept delta", type:"float"},
+      {k:"MATCH_FAST_REJECT_DELTA", label:"Fast reject delta", type:"float"},
+      {k:"HASH_STABILITY_BITS", label:"Min changed bits to re-OCR", type:"int"},
+    ]
+  },
+  
+  {
+    title: "AI / YOLOv5",
+    items: [
+      {k:"AI_ENABLED", label:"Enable AI", type:"bool"},
+      {k:"AI_ONLY_MODE", label:"AI ROIs only (ignore static ROIs)", type:"bool"},
+      {k:"AI_USE_FOR_CARDS", label:"Use AI to find the card box", type:"bool"},
+      {k:"AI_USE_FOR_ROIS", label:"Use AI to find title/set/etc ROIs", type:"bool"},
+      {k:"AI_MODEL_PATH", label:"Model path (best.pt)"},
+      {k:"YOLOV5_DIR", label:"Local yolov5 repo dir"},
+      {k:"AI_IMG_SIZE", label:"AI image size", type:"int"},
+      {k:"AI_CONF_THRES", label:"AI conf threshold", type:"float"},
+      {k:"AI_IOU_THRES", label:"AI IoU threshold", type:"float"},
+      {k:"AI_MAX_DETS", label:"AI max detections", type:"int"},
     ]
   },
   {
@@ -842,7 +881,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         updatePills(sc, scannerPills);
 
         const p1p = [{ txt: (s.ws_connected ? "WS connected" : "WS offline"), cls: (s.ws_connected ? "ok" : "bad") }];
-        if (s.awaiting) p1p.push({ txt: "Awaiting scan (job " + s.job_id + ")", cls: "warn" });
+        if (s.awaiting) p1p.push({ txt: "Most recent scan - Job #" + s.job_id, cls: "warn" });
         if (s.last_decision) p1p.push({ txt: s.last_decision, cls: "ok" });
         updatePills(p1, p1p);
 

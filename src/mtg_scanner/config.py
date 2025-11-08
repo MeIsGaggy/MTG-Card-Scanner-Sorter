@@ -78,6 +78,16 @@ TEXT_PRESENCE_MIN = _get("TEXT_PRESENCE_MIN", 0.020, float)
 TITLE_ALLOW_TESS_FALLBACK = _get("TITLE_ALLOW_TESS_FALLBACK", 0, bool)
 
 # =========================
+# OCR FAST-PATH TOGGLES (easy to remove)
+# =========================
+OCR_FAST_PATH = _get("OCR_FAST_PATH", True, bool)
+OCR_LAZY_SET_HINT = _get("OCR_LAZY_SET_HINT", True, bool)
+OCR_TITLE_SINGLE_PASS = _get("OCR_TITLE_SINGLE_PASS", True, bool)
+OCR_USE_EASYOCR = _get("OCR_USE_EASYOCR", True, bool)
+OCR_TITLE_MAX_W = _get("OCR_TITLE_MAX_W", 640, int)
+OCR_NUMBER_FASTPATH = _get("OCR_NUMBER_FASTPATH", True, bool)
+
+# =========================
 # FOIL DETECTION
 # =========================
 FOIL_MIN_SCORE = _get("FOIL_MIN_SCORE", 1.25, float)
@@ -244,3 +254,10 @@ SET_NAME_FALLBACK_ENABLE = _get("SET_NAME_FALLBACK_ENABLE", True, bool)   # use 
 # Cache for Scryfall /sets (code + icon_svg_uri), persisted across runs
 SCRY_SETS_CACHE_PATH = _get("SCRY_SETS_CACHE_PATH", "./cache/scry_sets.json", str)
 SCRY_SETS_CACHE_TTL_S = _get("SCRY_SETS_CACHE_TTL_S", 86400, int)  # 24h
+
+
+# --- Pipeline toggles (injected) ---
+REQUIRE_PRINTER_ACK = _get('REQUIRE_PRINTER_ACK', False, bool)
+MANUAL_SCAN_BYPASS_STEADY = _get('MANUAL_SCAN_BYPASS_STEADY', True, bool)
+# Skip reading collector number in OCR; rely on Scryfall + visual compare
+OCR_SKIP_NUMBER = _get("OCR_SKIP_NUMBER", True, bool)
