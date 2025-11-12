@@ -6,13 +6,16 @@ except NameError:
     _BOOT_LOG = []
     def _dbg(tag, msg, level=1):
         try:
+            # Suppress time-debug logs with PERF tag even during bootstrap
+            if str(tag).strip().upper().startswith('PERF'):
+                return
             _BOOT_LOG.append((level, _time.time(), str(tag), str(msg)))
         except Exception:
             pass
-        try:
-            print(f"[{tag}] {msg}")
-        except Exception:
-            pass
+            try:
+                print(f"[{tag}] {msg}")
+            except Exception:
+                pass
     def _dbg2(tag, msg):
         _dbg(tag, msg, 2)
 # --- end bootstrap stub ---
@@ -95,7 +98,7 @@ MATCH_FAST_ACCEPT_DELTA = globals().get("MATCH_FAST_ACCEPT_DELTA", 0.08)  # acce
 MATCH_FAST_REJECT_DELTA = globals().get("MATCH_FAST_REJECT_DELTA", 0.12)  # reject early if (hash+hist) is under by this
 MATCH_ORB_FEATURES      = globals().get("MATCH_ORB_FEATURES", 900)        # fewer ORB features = faster
 HASH_STABILITY_BITS     = globals().get("HASH_STABILITY_BITS", 4)         # min changed bits to re-OCR
-PROC_DOWNSCALE_MAX_W    = globals().get("PROC_DOWNSCALE_MAX_W", PROC_MAX_WIDTH)  # still honor your config
+PROC_DOWNSCALE_MAX_W    = int(globals().get("PROC_DOWNSCALE_MAX_W", globals().get("PROC_MAX_WIDTH", 640)))  # still honor your config
 SC_IMG_CACHE_DIR        = globals().get("SC_IMG_CACHE_DIR", "./.scry_img_cache") # disk cache for card images
 USE_OPENCL              = globals().get("USE_OPENCL", True)
 
@@ -407,7 +410,7 @@ _last_detect_ts = 0.0
 tracks_lock = threading.Lock()
 
 
-cap, output_frame, current_card_crop, scanned_card = None, None, None, None
+cap, output_frame, current_card_crop, current_card_quad, scanned_card = None, None, None, None, None
 last_scan_ts = 0.0
 
 tracks = OrderedDict()
@@ -873,6 +876,80 @@ def warp_card(frame, quad):
     warped = cv2.resize(warped, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
     warped = _auto_orient_upright(warped)
     return warped
+def refine_card_quad(frame, init_quad=None, prev_quad=None):
+    try:
+        H, W = frame.shape[:2]
+        if init_quad is None:
+            return None, None
+        q = np.array(init_quad, dtype=np.float32)
+        x0 = max(0, int(np.floor(q[:,0].min())))
+        y0 = max(0, int(np.floor(q[:,1].min())))
+        x1 = min(W, int(np.ceil(q[:,0].max())))
+        y1 = min(H, int(np.ceil(q[:,1].max())))
+        pad = int(0.12 * max(x1-x0, y1-y0))
+        x0 = max(0, x0 - pad); y0 = max(0, y0 - pad)
+        x1 = min(W, x1 + pad); y1 = min(H, y1 + pad)
+        roi = frame[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None, None
+
+        g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        g = cv2.GaussianBlur(g, (5,5), 0)
+        v = float(np.median(g))
+        lo = int(max(0, 0.66*v)); hi = int(min(255, 1.33*v))
+        e = cv2.Canny(g, lo, hi)
+        e = cv2.morphologyEx(e, cv2.MORPH_CLOSE, np.ones((3,3), np.uint8), iterations=2)
+        cnts,_ = cv2.findContours(e, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        best = None; best_score = -1.0
+        area_img = float(roi.shape[0] * roi.shape[1])
+        for c in cnts:
+            a = cv2.contourArea(c)
+            if a < 0.08 * area_img:
+                continue
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02*peri, True)
+            if len(approx) < 4:
+                approx = cv2.convexHull(c)
+            if len(approx) < 4:
+                continue
+            rect = cv2.minAreaRect(approx)
+            box = order_points(cv2.boxPoints(rect).astype(np.float32))
+            # back to full-frame coords
+            box[:,0] += x0; box[:,1] += y0
+
+            # aspect check (H/W ~ 1.40)
+            w = (np.linalg.norm(box[1]-box[0]) + np.linalg.norm(box[2]-box[3])) * 0.5
+            h = (np.linalg.norm(box[3]-box[0]) + np.linalg.norm(box[2]-box[1])) * 0.5
+            ar = h / max(w, 1e-6)
+            if not (1.36 <= ar <= 1.44):
+                continue
+            score = a / area_img
+            if score > best_score:
+                best, best_score = box, score
+
+        if best is None:
+            return None, None
+
+        # temporal EMA if previous exists
+        if prev_quad is not None:
+            prev = np.array(prev_quad, dtype=np.float32)
+            if prev.shape == best.shape:
+                alpha = 1.0
+                best = (alpha*best + (1.0-alpha)*prev).astype(np.float32)
+
+        # produce warp as well for immediate OCR
+        M = cv2.getPerspectiveTransform(best.astype('float32'),
+                                        np.array([[0,0],[CARD_W-1,0],[CARD_W-1,CARD_H-1],[0,CARD_H-1]], dtype='float32'))
+        warp = cv2.warpPerspective(frame, M, (CARD_W, CARD_H))
+        px = int(CARD_W * 0.01); py = int(CARD_H * 0.01)
+        warp = warp[py:CARD_H-py, px:CARD_W-px]
+        warp = cv2.resize(warp, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
+        warp = _auto_orient_upright(warp)
+        return best, warp
+    except Exception:
+        return None, None
+
 
 def _roi_rel_pad(img, roi, pad_x=0.02, pad_y=0.00):
     h, w = img.shape[:2]
@@ -2930,7 +3007,15 @@ def video_thread():
                 with tracks_lock:
                     locked = next((t for t in tracks.values() if t.get('seen', 0) >= CONFIRM_FRAMES), None)
                 if locked:
-                    cv2.polylines(out, [locked['box'].astype(int)], True, (0, 255, 0), 2)
+                    quad = None
+                    try:
+                        with video_lock:
+                            quad = current_card_quad
+                    except Exception:
+                        quad = None
+                    if quad is None:
+                        quad = locked['box']
+                    cv2.polylines(out, [quad.astype(int)], True, (0, 255, 0), 2)
             except Exception:
                 pass
 
@@ -3041,11 +3126,23 @@ def detect_worker():
         # Update crop + scanner state
         if locked is not None:
             try:
-                crop = warp_card(frame, locked['box'])
+                # refine the quad for cropping without affecting locking/steady logic
+                prev_q = None
+                with video_lock:
+                    prev_q = current_card_quad
+                refined_q, refined_warp = refine_card_quad(frame, init_quad=locked['box'], prev_quad=prev_q)
+                if refined_q is not None and refined_warp is not None:
+                    crop = refined_warp
+                    use_quad = refined_q
+                else:
+                    crop = warp_card(frame, locked['box'])
+                    use_quad = locked['box']
             except Exception:
                 crop = None
+                use_quad = None
             with video_lock:
                 current_card_crop = crop
+                current_card_quad = use_quad
                 steady = locked.get('seen', 0) >= STEADY_MIN_FRAMES
                 scanner_state.update({
                     'locked': True,
@@ -5142,7 +5239,7 @@ def _start_workers():
         _dbg("SETTINGS ERROR", f"apply DETECT_ROI failed: {e}")
 
     # Warm catalogs in the background
-    threading.Thread(target=_load_scryfall_catalogs_bg, daemon=True).start()
+    _start_scry_warmup_once()
 
     # Fire up all workers
     threading.Thread(target=detect_worker,   daemon=True).start()
@@ -5434,7 +5531,7 @@ try:
 "FAST_PATH": bool(globals().get("OCR_FAST_PATH", True) or globals().get("FAST_OCR_MODE", False)),
         "LAZY_SH":   bool(globals().get("OCR_LAZY_SET_HINT", True)),
         "SINGLE":    bool(globals().get("OCR_TITLE_SINGLE_PASS", True)),
-        "USE_EASY":  bool(globals().get("OCR_USE_EASYOCR", True)),
+        "USE_EASY":  bool(globals().get("OCR_USE_EASYOCR", False)),
         "MAXW":      int(globals().get("OCR_TITLE_MAX_W", 640)),
         "FAST_NUM":  bool(globals().get("OCR_NUMBER_FASTPATH", True)),
         "SKIP_NUM": bool(globals().get("OCR_SKIP_NUMBER", False)),

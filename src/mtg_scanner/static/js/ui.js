@@ -260,9 +260,11 @@ btnLogClear?.addEventListener("click", () => {
       const r = await fetch("/api/carddata?ts=" + Date.now());
       if (!r.ok) return;
       const d = await r.json();
-      if (!d || typeof d.last_updated !== "number" || Math.abs((d.last_updated || 0) - (s.updated_at || 0)) > 0.5) return;
+      if (!d || typeof d.last_updated !== "number") { if (ci) ci.innerHTML = ""; return; }
+      // Retry briefly if cardinfo backend is a little behind OCR
+      if ((d.last_updated || 0) < (s.updated_at || 0)) { setTimeout(() => updateCardInfo(s), 250); return; }
 
-      if (!d.scry) { ci.innerHTML = pill("warn", "Card not found: " + (s.name_raw || s.name)); return; }
+      if (!d.scry) { setTimeout(() => updateCardInfo(s), 250); return; }
       const c = d.scry || {};
       const p = c.prices || {};
       const fx = (d.fx && d.fx.rate) || 1.3;
@@ -811,9 +813,9 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
               '<div style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b>' +
                 (it.name || "(unnamed)") + "</b> " + numStr +
               "</div>" +
-              '<span class="pill ' + cls + '">' + String((it.status || "FAIL")).toUpperCase() + "</span>" +
+              '<span class="pill ' + cls + '">VISUAL - ' + String((it.status || "FAIL")).toUpperCase() + "</span>" +
             "</div>" +
-            '<div class="meta"><span>score ' + score.toFixed(2) + "</span>" +
+            '<div class="meta"><span>Visual Score: ' + (score*100).toFixed(2) + "%</span>" +
               (it.scry_set ? ('<span>' + String(it.scry_set).toUpperCase() + " " + (it.scry_cn || "") + "</span>") : "") +
               (it.scry_name ? ('<span>→ ' + it.scry_name + "</span>") : "") +
               (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length

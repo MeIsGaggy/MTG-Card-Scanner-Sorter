@@ -81,7 +81,7 @@ TITLE_ALLOW_TESS_FALLBACK = _get("TITLE_ALLOW_TESS_FALLBACK", 0, bool)
 # OCR FAST-PATH TOGGLES (easy to remove)
 # =========================
 OCR_FAST_PATH = _get("OCR_FAST_PATH", True, bool)
-OCR_LAZY_SET_HINT = _get("OCR_LAZY_SET_HINT", True, bool)
+OCR_LAZY_SET_HINT = _get("OCR_LAZY_SET_HINT", False, bool)
 OCR_TITLE_SINGLE_PASS = _get("OCR_TITLE_SINGLE_PASS", True, bool)
 OCR_USE_EASYOCR = _get("OCR_USE_EASYOCR", True, bool)
 OCR_TITLE_MAX_W = _get("OCR_TITLE_MAX_W", 640, int)
@@ -159,7 +159,7 @@ BAD_DIR        = _get("BAD_DIR",   "/tmp/mtg_bad", str)
 # =========================
 # PERSISTENCE (Review history)
 # =========================
-HISTORY_DIR       = _get("HISTORY_DIR", "./history", str)
+HISTORY_DIR       = _get("HISTORY_DIR", ".src/history", str)
 HISTORY_IMG_DIR   = _get("HISTORY_IMG_DIR", os.path.join(HISTORY_DIR, "imgs"), str)
 HISTORY_JSON_EXT  = _get("HISTORY_JSON_EXT", ".json", str)
 JPEG_QUALITY_SNAP = _get("JPEG_QUALITY_SNAP", 82, int)
@@ -261,3 +261,45 @@ REQUIRE_PRINTER_ACK = _get('REQUIRE_PRINTER_ACK', False, bool)
 MANUAL_SCAN_BYPASS_STEADY = _get('MANUAL_SCAN_BYPASS_STEADY', True, bool)
 # Skip reading collector number in OCR; rely on Scryfall + visual compare
 OCR_SKIP_NUMBER = _get("OCR_SKIP_NUMBER", True, bool)
+
+# =========================
+# EXPORTS & DISK CACHES
+# =========================
+EXPORT_DIR          = _get("EXPORT_DIR", "./exports", str)
+SC_IMG_CACHE_DIR    = _get("SC_IMG_CACHE_DIR", "./.scry_img_cache", str)
+SCRY_IMG_LRU_MAX    = _get("SCRY_IMG_LRU_MAX", 150, int)   # card image LRU (in-memory)
+SCRY_FEATS_LRU_MAX  = _get("SCRY_FEATS_LRU_MAX", 300, int) # features LRU (in-memory)
+
+# =========================
+# AUTOSCAN / STEADY (helpers)
+# =========================
+STEADY_GRACE_S      = _get("STEADY_GRACE_S", 4.0, float)
+STEADY_WATCHDOG_S   = _get("STEADY_WATCHDOG_S", 6.0, float)
+
+# =========================
+# STREAMING
+# =========================
+STREAM_ENABLED      = _get("STREAM_ENABLED", True, bool)
+STREAM_FPS          = _get("STREAM_FPS", 15, int)
+STREAM_JPEG_QUALITY = _get("STREAM_JPEG_QUALITY", 68, int)
+
+# =========================
+# OCR / PERFORMANCE
+# =========================
+FAST_OCR_MODE            = _get("FAST_OCR_MODE", True, bool)
+HASH_STABILITY_BITS      = _get("HASH_STABILITY_BITS", 4, int)
+MATCH_FAST_ACCEPT_DELTA  = _get("MATCH_FAST_ACCEPT_DELTA", 0.08, float)
+MATCH_FAST_REJECT_DELTA  = _get("MATCH_FAST_REJECT_DELTA", 0.12, float)
+USE_OPENCL               = _get("USE_OPENCL", True, bool)
+
+# =========================
+# ORIENTATION
+# =========================
+AUTO_ORIENT = _get("AUTO_ORIENT", True, bool)
+
+# =========================
+# AI ROI (full-card padding)
+# =========================
+AI_CARD_PAD_LEFT  = _get("AI_CARD_PAD_LEFT", 0.10, float)
+AI_CARD_PAD_RIGHT = _get("AI_CARD_PAD_RIGHT", 0.02, float)
+AI_CARD_PAD_Y     = _get("AI_CARD_PAD_Y", 0.10, float)
