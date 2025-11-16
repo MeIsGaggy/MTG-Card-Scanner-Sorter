@@ -45,7 +45,9 @@
   let streamOn = true;
   let logAfter = 0;
   let logPaused = false;
-  let historyQueryQS = "";
+  let historyQueryQS = "";  // list view filters
+let historyModalQueryQS = "";  // modal-only filters
+let filterContext = 'list';
   let modalOpen = false;
 
 function pill(cls, txt, title) {
@@ -284,9 +286,27 @@ btnLogClear?.addEventListener("click", () => {
       const tag = (txt) => '<span class="tag">' + txt + "</span>";
       const kw = Array.isArray(c.keywords) ? c.keywords : [];
 
+      const priceBlock = (
+        (usd && (usd.n != null || usd.f != null || usd.e != null))
+          ? (
+            '<div class="prices prices-below">' +
+              '<div class="phead">Prices</div>' +
+              '<div class="prow">' +
+                (usd.n != null ? tag("Normal: " + money(usd.n) + " / " + money(cad.n, "CAD")) : "") +
+                (usd.f != null ? tag("Foil: "   + money(usd.f) + " / " + money(cad.f, "CAD")) : "") +
+                (usd.e != null ? tag("Etched: " + money(usd.e) + " / " + money(cad.e, "CAD")) : "") +
+              "</div>" +
+            "</div>"
+          )
+          : ''
+      );
+
       ci.innerHTML =
         '<div class="cardbox">' +
-          '<div class="left">' + (image ? ('<img class="art" src="' + image + '" alt="Card">') : "") + "</div>" +
+          '<div class="left">' +
+            (image ? ('<img class="art" src="' + image + '" alt="Card">') : "") +
+            priceBlock +
+          "</div>" +
           '<div class="right">' +
             '<div class="title"><div class="name">' + (c.name || "") + "</div>" + (c.mana_cost ? ('<div class="mana">' + c.mana_cost + "</div>") : "") + "</div>" +
             '<div class="subline">' +
@@ -303,21 +323,6 @@ btnLogClear?.addEventListener("click", () => {
               (flavor ? ('<div class="flavor">“' + flavor + "”</div>") : "") +
               (kw.length ? ('<div class="keywords">' + kw.map(tag).join(" ") + "</div>") : "") +
             "</div>" +
-            // ⬇️ Prices lives INSIDE .right now
-            (
-              (usd && (usd.n != null || usd.f != null || usd.e != null))
-                ? (
-                  '<div class="prices prices-below">' +
-                    '<div class="phead">Prices</div>' +
-                    '<div class="prow">' +
-                      (usd.n != null ? tag("Normal: " + money(usd.n) + " / " + money(cad.n, "CAD")) : "") +
-                      (usd.f != null ? tag("Foil: "   + money(usd.f) + " / " + money(cad.f, "CAD")) : "") +
-                      (usd.e != null ? tag("Etched: " + money(usd.e) + " / " + money(cad.e, "CAD")) : "") +
-                    "</div>" +
-                  "</div>"
-                )
-                : ''
-            ) +
           "</div>" +  
         "</div>";   
     } catch {}
@@ -358,7 +363,8 @@ function closeFilter() {
   backdrop.classList.add('hidden');
   fmodal.classList.add('hidden');
 }
-$('#btn-open-filter')?.addEventListener('click', openFilter);
+// set filterContext list on btn-open-filter
+$('#btn-open-filter')?.addEventListener('click', () => { filterContext='list'; applyFilterFieldsFromQS(historyQueryQS); openFilter(); });
 $('#filter-close')?.addEventListener('click', closeFilter);
 backdrop?.addEventListener('click', ()=>{ closeFilter(); closeExport?.(); closeEditModal?.(); });
 document.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ closeFilter(); closeExport?.(); closeEditModal?.(); }});
@@ -387,7 +393,7 @@ function buildHistoryQuery() {
   if (foil)    qs.set('foil', foil);
   qs.set('sort_by',  sortBy);
   qs.set('sort_dir', sortDir);
-  qs.set('limit', '200');
+  qs.set('limit', 'all');
   return qs.toString();
 }
 
@@ -424,8 +430,7 @@ async function fetchScans() {
 // In the filter modal handlers:
 $('#hf-apply')?.addEventListener('click', () => { 
   closeFilter(); 
-  historyQueryQS = buildHistoryQuery(); 
-  fetchScans(); 
+  if (filterContext === 'history') { historyModalQueryQS = buildHistoryQuery(); try { refreshHistoryGrid(); } catch(e) {} } else { historyQueryQS = buildHistoryQuery(); fetchScans(); }
 });
 
 $('#hf-reset')?.addEventListener('click', () => {
@@ -436,8 +441,7 @@ $('#hf-reset')?.addEventListener('click', () => {
   document.getElementById('hf-status').value = 'all';
   document.getElementById('hf-sortby').value = 'ts';
   document.getElementById('hf-sortdir').value = 'desc';
-  historyQueryQS = ""; 
-  fetchScans();
+  if (filterContext === 'history') { historyModalQueryQS = ""; try { refreshHistoryGrid(); } catch(e) {} } else { historyQueryQS = ""; fetchScans(); }
 });
 
 // (optional) if you add a "ManaBox CSV" button:
@@ -613,6 +617,36 @@ const SETTINGS_SCHEMA = [
       {k:"PORT", label:"Port", type:"int"},
     ]
   },
+
+  {
+    title: "Tracking & Warp",
+    items: [
+      {k:"TRACK_ALPHA", label:"Track alpha (stiffness)", type:"float"},
+      {k:"TRACK_BETA", label:"Track beta (velocity)", type:"float"},
+      {k:"TRACK_DEADBAND_PX", label:"Deadband (px)", type:"float"},
+      {k:"LOCK_IOU_THRESH", label:"Lock IoU threshold", type:"float"},
+      {k:"ACQUIRE_FRAMES", label:"Frames to lock", type:"int"},
+      {k:"DROP_MISS_FRAMES", label:"Misses to drop", type:"int"},
+      {k:"PREDICT_HOLD", label:"Predict-only frames", type:"int"},
+      {k:"STEADY_SPEED_PX", label:"Steady speed (px)", type:"float"},
+      {k:"WARP_EXPAND_PCT", label:"Warp expand %", type:"float"},
+      {k:"WARP_CROP_PCT", label:"Warp crop %", type:"float"},
+      {k:"DETECT_MAX_FPS", label:"Detect max fps", type:"int"},
+    ]
+  },
+
+
+  {
+    title: "Appearance / Photometric",
+    items: [
+      {k:"APPEARANCE_ALIGN_ENABLE", label:"Enable appearance alignment", type:"bool"},
+      {k:"APPEARANCE_AB_STRENGTH", label:"Chroma transfer strength", type:"float"},
+      {k:"APPEARANCE_SAT_STRENGTH", label:"Saturation match strength", type:"float"},
+      {k:"APPEARANCE_GAMMA_CLAMP", label:"Gamma clamp (min,max)"},
+      {k:"TONE_ALIGN_ENABLE", label:"Tone alignment", type:"bool"},
+    ]
+  },
+
 ];
 
 // ===== Settings Modal (fixed, long scrollable form) =====
@@ -817,7 +851,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
             "</div>" +
             '<div class="meta"><span>Visual Score: ' + (score*100).toFixed(2) + "%</span>" +
               (it.scry_set ? ('<span>' + String(it.scry_set).toUpperCase() + " " + (it.scry_cn || "") + "</span>") : "") +
-              (it.scry_name ? ('<span>→ ' + it.scry_name + "</span>") : "") +
+              
               (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length
                 ? '<span class="pill warn" title="' + it.review_reasons.join(' • ').replace(/"/g,'&quot;') + '">Review Req.</span>'
                 : "") +
@@ -827,7 +861,15 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       );
     }).join("");
 
-    revCount.textContent = (Number(scans.count) || items.length) + " items";
+    const total = Number(
+      (scans && (scans.total ?? scans.count)) || items.length || 0
+    );
+    const shown = items.length;
+    let label = `${total.toLocaleString()} items`;
+    if (total > shown && shown > 0) {
+      label += ` (showing ${shown.toLocaleString()})`;
+    }
+    revCount.textContent = label;
     Array.from(revList.querySelectorAll(".revitem")).forEach(function (el) {
       el.addEventListener("click", function () {
         const id = Number(el.getAttribute("data-id"));
@@ -902,7 +944,6 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
           ocrPills.push({ txt: "Why?", cls: "warn", title: why });
         }
 
-        if (s.provider) ocrPills.push({ txt: "Provider: " + s.provider, cls: "ok" });
         if (s.last_error) ocrPills.push({ txt: "OCR err: " + s.last_error, cls: "bad" });
         updatePills(ocrEl, ocrPills);
 
@@ -983,6 +1024,229 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     }
   }
   btnEdit?.addEventListener('click', (e)=>{ e.preventDefault(); if (currentLoadedId) openEditModal(); });
+
+  // ---- All History (fullscreen grid) ----
+  function ensureHistoryModals() {
+    if (!document.getElementById('history-modal')) {
+      const tpl = document.createElement('div');
+      tpl.innerHTML = `
+      <div id="history-modal" class="mm-modal hidden fullscreen" aria-hidden="true">
+        <div class="mm-modal__header">
+          <div class="mm-title">All History</div><button class="btn btn-pill" id="history-filter">Filters…</button>
+          <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
+        </div>
+        <div class="mm-modal__body">
+          <div id="history-grid" class="history-grid" aria-label="All history grid"></div>
+        </div>
+      </div>
+      <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;" aria-hidden="true">
+        <div class="mm-modal__header">
+          <div class="mm-title">Choose Action</div>
+          <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
+        </div>
+        <div class="mm-modal__body">
+          <div class="mm-grid" style="grid-template-columns: 1fr;">
+            <button class="btn btn-pill btn-primary" id="histopt-pass">Mark Pass</button>
+            <button class="btn btn-pill"              id="histopt-fail">Mark Fail</button>
+            <button class="btn btn-pill"              id="histopt-edit">Load Data</button>
+            <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
+          </div>
+        </div>
+      </div>`;
+      document.body.appendChild(tpl);
+    }
+  }
+
+  const btnOpenHistory = document.getElementById("btn-open-history");
+  const filterBackdrop = document.getElementById("filter-backdrop");
+
+  let histSelectedId = null;
+  function openBackdrop() { filterBackdrop?.classList.remove("hidden"); }
+  function hideBackdropIfNone() {
+    const ids = ["filter-modal","export-modal","export-modal-txt","export-modal-csv","printer-modal","settings-modal","history-modal","history-options-modal"];
+    const anyOpen = ids.map(id=>document.getElementById(id)).some(el => el && !el.classList.contains("hidden"));
+    if (!anyOpen) filterBackdrop?.classList.add("hidden");
+  }
+
+  function renderHistoryGrid(items) {
+    const grid = document.getElementById("history-grid");
+    if (!grid) return;
+    grid.innerHTML = items.map(function (it) {
+      const cls = (it.status === "pass" ? "ok" : "bad");
+      const score = Number(it.match_score || 0);
+      const numStr = it.number ? `• #${it.number}` : "";
+      const setStr = it.scry_set ? `${String(it.scry_set).toUpperCase()} ${it.scry_cn || ""}` : "";
+      const scryName = it.scry_name ? `→ ${it.scry_name}` : "";
+      const warn = (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length)
+        ? `<span class="pill warn" title="${(it.review_reasons||[]).join(' • ').replace(/"/g,'&quot;')}">Review Req.</span>`
+        : "";
+      return `
+        <div class="hcard" data-id="${it.id}">
+          <img class="thumb" loading="lazy" src="/api/scan/${it.id}/thumb" alt="scan ${it.id}">
+          <div class="row">
+            <div class="title">${(it.name || "(unnamed)")} ${numStr}</div>
+            <span class="pill ${cls}">${String((it.status || "FAIL")).toUpperCase()}</span>
+          </div>
+          <div class="meta">
+            <span>Visual: ${(score*100).toFixed(2)}%</span>
+            ${setStr ? `<span>${setStr}</span>` : ""}
+            ${scryName ? `<span>${scryName}</span>` : ""}
+            ${warn}
+          </div>
+        </div>
+      `;
+    }).join("");
+    // Card click => options modal
+    grid.querySelectorAll(".hcard").forEach(function(card){
+      card.addEventListener("click", function(){
+        histSelectedId = Number(card.getAttribute("data-id"));
+        document.getElementById("history-options-modal")?.classList.remove("hidden");
+        openBackdrop();
+      });
+    });
+  }
+
+  
+  function isHistoryModalOpen() {
+    const m = document.getElementById("history-modal");
+    return !!(m && !m.classList.contains("hidden"));
+  }
+  function refreshHistoryGrid() {
+    if (!isHistoryModalOpen()) return;
+    const baseQS = historyModalQueryQS || buildHistoryQuery();
+    const qs = baseQS ? baseQS + '&' : '';
+    fetch('/api/scans?' + qs + 'ts=' + Date.now())
+      .then(r => r.json())
+      .then(d => renderHistoryGrid((d && d.items) || []));
+  }
+
+
+  function applyFilterFieldsFromQS(qsStr) {
+    try {
+      const params = new URLSearchParams(qsStr || '');
+      const setIf = (id, val) => { const el = document.getElementById(id); if (el && val !== null) el.value = val; };
+      setIf('hf-status',  params.get('status')   ?? 'all');
+      setIf('hf-scoremin',params.get('score_min')?? '');
+      setIf('hf-since',   params.get('since')    ?? '');
+      setIf('hf-q',       params.get('q')        ?? '');
+      setIf('hf-set',     params.get('set')      ?? '');
+      setIf('hf-foil',    params.get('foil')     ?? '');
+      setIf('hf-sortby',  params.get('sort_by')  ?? 'ts');
+      setIf('hf-sortdir', params.get('sort_dir') ?? 'desc');
+    } catch(e) {}
+  }
+
+function openHistoryModal() {
+    ensureHistoryModals();
+    const modal = document.getElementById("history-modal");
+    const closeBtn = document.getElementById("history-close");
+    // Bind close once
+    
+    const hfBtn = document.getElementById("history-filter");
+    if (hfBtn && !hfBtn._bound) {
+      hfBtn.addEventListener("click", function(){
+        // reuse the existing filter modal
+        filterContext = 'history'; applyFilterFieldsFromQS(historyModalQueryQS); openFilter?.();
+      });
+      hfBtn._bound = true;
+    }
+if (!closeBtn._boundClose) {
+      closeBtn.addEventListener("click", function(){
+        modal?.classList.add("hidden");
+        hideBackdropIfNone();
+      });
+      closeBtn._boundClose = true;
+    }
+    openBackdrop();
+    modal?.classList.remove("hidden");
+    const baseQS = historyModalQueryQS || buildHistoryQuery();
+    const qs = baseQS ? baseQS + '&' : '';
+    fetch('/api/scans?' + qs + 'ts=' + Date.now())
+      .then(r => r.json())
+      .then(d => renderHistoryGrid((d && d.items) || []));
+  }
+
+  // Options modal handlers (create on demand too)
+  function bindHistoryOptionHandlers() {
+    const passBtn = document.getElementById("histopt-pass");
+    const failBtn = document.getElementById("histopt-fail");
+    const editBtn = document.getElementById("histopt-edit");
+    const delBtn  = document.getElementById("histopt-delete");
+    const optClose= document.getElementById("histopt-close");
+    const optModal= document.getElementById("history-options-modal");
+
+    function closeOpt(){ optModal?.classList.add("hidden"); hideBackdropIfNone(); }
+
+    if (!passBtn._bound) {
+      passBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        fetch('/api/scan/'+histSelectedId+'/status', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({status:'pass'})
+        }).then(()=>{ closeOpt(); fetchScans(); openHistoryModal(); });
+      });
+      passBtn._bound = true;
+    }
+    if (!failBtn._bound) {
+      failBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        fetch('/api/scan/'+histSelectedId+'/status', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({status:'fail'})
+        }).then(()=>{ closeOpt(); fetchScans(); openHistoryModal(); });
+      });
+      failBtn._bound = true;
+    }
+    if (!delBtn._bound) {
+      delBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        fetch('/api/scan/'+histSelectedId+'/delete', {method:'POST'})
+          .then(()=>{ closeOpt(); fetchScans(); openHistoryModal(); });
+      });
+      delBtn._bound = true;
+    }
+    if (!editBtn._bound) {
+      editBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        fetch('/api/scan/'+histSelectedId+'/load', {method:'POST'})
+          .then(r=>r.json())
+          .then((res)=>{
+            if (res && res.ok) {
+              currentLoadedId = histSelectedId;
+              document.getElementById("history-modal")?.classList.add("hidden");
+              // reuse existing Edit modal opener
+              //document.getElementById("btnEdit")?.click();
+              closeOpt();
+            }
+          });
+      });
+      editBtn._bound = true;
+    }
+    if (!optClose._bound) {
+      optClose.addEventListener("click", closeOpt);
+      optClose._bound = true;
+    }
+  }
+
+  // Hook up the button (works even if button is added later)
+  (function attachHistoryButtonObserver(){
+    function bind(){
+      const btn = document.getElementById("btn-open-history");
+      if (!btn || btn._bound) return;
+      btn.addEventListener("click", function(){
+        ensureHistoryModals();
+        bindHistoryOptionHandlers();
+        openHistoryModal();
+      });
+      btn._bound = true;
+    }
+    // Try now
+    bind();
+    // And observe future mutations (in case toolbar is dynamically replaced)
+    const obs = new MutationObserver(bind);
+    obs.observe(document.body, {subtree:true, childList:true});
+  })();
+
 
   if (btnClose) btnClose.onclick = closeEditModal;
   modal?.addEventListener("click", (e) => { if (e.target === modal || e.target.classList.contains("backdrop")) closeEditModal(); });
@@ -1426,4 +1690,3 @@ document.getElementById('btnMeasureDeck')?.addEventListener('click', async () =>
   document.getElementById('printer-estop')?.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); doEstop(); });
   if (!window.estop) { window.estop = doEstop; }
 })();
-

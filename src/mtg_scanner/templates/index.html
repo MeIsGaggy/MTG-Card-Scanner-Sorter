@@ -55,8 +55,7 @@
       <div class="console-wrap">
         <pre id="consoleBox" class="consolebox" aria-live="polite"></pre>
         <div class="row toolbar">
-          <button id="btnLogClear">Clear Console</button>
-          <button id="btn-open-settings" class="btn btn-pill">App Settings</button>
+          <button id="btn-open-settings">App Settings</button>
         </div>
       </div>
     </div>
@@ -88,6 +87,7 @@
           <button id="btnMarkFail">Fail</button>
           <button id="btnEdit">Edit</button>
           <button id="btnDelete" class="danger">Delete</button>
+          <button id="btn-open-history" class="btn btn-pill">All History…</button>
           <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
           <button id="btn-export-txt"  class="btn btn-pill">Export Decklist</button>
           <button id="btn-export-csv"  class="btn btn-pill">Export CSV</button>
@@ -101,6 +101,35 @@
     <span class="label">Version:</span>
     <span id="vnum">…</span>
   </div>
+  </div>
+
+  
+  <!-- Fullscreen History Modal -->
+  <div id="history-modal" class="mm-modal hidden fullscreen" aria-hidden="true">
+    <div class="mm-modal__header">
+      <div class="mm-title">All History</div>
+      <button class="btn btn-pill" id="history-filter">Filters…</button>
+      <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
+    </div>
+    <div class="mm-modal__body">
+      <div id="history-grid" class="history-grid" aria-label="All history grid"></div>
+    </div>
+  </div>
+
+  <!-- History Item Options Modal -->
+  <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;" aria-hidden="true">
+    <div class="mm-modal__header">
+      <div class="mm-title">Choose Action</div>
+      <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
+    </div>
+    <div class="mm-modal__body">
+      <div class="mm-grid" style="grid-template-columns: 1fr;">
+        <button class="btn btn-pill btn-primary" id="histopt-pass">Mark Pass</button>
+        <button class="btn btn-pill"              id="histopt-fail">Mark Fail</button>
+        <button class="btn btn-pill"              id="histopt-edit">Edit…</button>
+        <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
+      </div>
+    </div>
   </div>
 
   <!-- Edit modal -->
@@ -311,6 +340,12 @@
       <button class="pc-speed" data-speed="9000">9000</button>
     </div>
     <input id="pc-speed-input" type="number" class="mm-input pc-speed-input" value="6000" step="1" min="1" aria-label="Speed input (mm/min)">
+    <span class="pc-speed-warning">
+      These speeds settings do NOT change speed of scanning cycles.
+    </br>
+    </br>
+    ⚠ Be careful when using high speeds. Setting this too high can destroy your printer ⚠
+  </span>
   </div>
 </div>
 <div class="mm-section">

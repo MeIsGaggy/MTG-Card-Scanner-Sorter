@@ -119,6 +119,14 @@ def _fast_mode() -> bool:
         return bool(FAST_OCR_MODE)
 
 FOIL_EVERY_N_FRAMES       = globals().get("FOIL_EVERY_N_FRAMES", 30)           # compute foil detection every N frames
+FOIL_SPEC_VAL_THRESHOLD   = int(globals().get("FOIL_SPEC_VAL_THRESHOLD", 212)) # brighter than this is treated as glare
+FOIL_SPEC_SAT_THRESHOLD   = int(globals().get("FOIL_SPEC_SAT_THRESHOLD", 88))  # low saturation threshold for glare masking
+FOIL_SPEC_DILATE          = int(globals().get("FOIL_SPEC_DILATE", 3))          # expand glare mask to catch halos
+FOIL_CLAHE_CLIP           = float(globals().get("FOIL_CLAHE_CLIP", 3.8))       # contrast limit for foil band CLAHE
+FOIL_CLAHE_TILE           = int(globals().get("FOIL_CLAHE_TILE", 8))           # tile size for CLAHE
+FOIL_SAT_SCALE            = float(globals().get("FOIL_SAT_SCALE", 0.55))       # post-processing saturation dampening
+FOIL_GAMMA                = float(globals().get("FOIL_GAMMA", 0.92))           # gamma applied to value channel to lift ink
+FOIL_UNSHARP_AMOUNT       = float(globals().get("FOIL_UNSHARP_AMOUNT", 0.32))  # unsharp mask strength for edge pop
 
 try:
     if USE_OPENCL and hasattr(cv2, "ocl"):
@@ -345,13 +353,6 @@ _logger_ready()
 
 APP_VERSION = get_current_version()
 UPDATE_INFO = {'current': APP_VERSION, 'latest': APP_VERSION, 'is_update': False, 'html_url': ''}
-    
-def ui_js_fallback():
-    p = os.path.join(APP_DIR, "static", "js", "ui.js")
-    try:
-        return send_file(p, mimetype="application/javascript")
-    except Exception:
-        return Response("/* ui.js missing */", mimetype="application/javascript")
 
 _repo = os.environ.get("MTG_SCANNER_REPO")
 if _repo:
@@ -411,6 +412,147 @@ tracks_lock = threading.Lock()
 
 
 cap, output_frame, current_card_crop, current_card_quad, scanned_card = None, None, None, None, None
+
+# ====== Stiff Card Tracker (fighter-jet style) ======
+# Alpha-Beta filter per-corner + hysteresis lock/unlock + deadband + hold-on-miss
+TRACK_ALPHA = float(globals().get("TRACK_ALPHA", 0.35))   # position blend (lower = stiffer)
+TRACK_BETA  = float(globals().get("TRACK_BETA", 0.15))    # velocity blend
+TRACK_DEADBAND_PX = float(globals().get("TRACK_DEADBAND_PX", 2.5))  # px: ignore sub-pixel jitter
+LOCK_IOU_THRESH   = float(globals().get("LOCK_IOU_THRESH", 0.55))   # bbox IoU to keep lock
+ACQUIRE_FRAMES    = int(globals().get("ACQUIRE_FRAMES", 6))         # stable frames to acquire
+DROP_MISS_FRAMES  = int(globals().get("DROP_MISS_FRAMES", 10))      # misses before drop lock
+PREDICT_HOLD      = int(globals().get("PREDICT_HOLD", 8))           # predict-only frames allowed
+STEADY_SPEED_PX   = float(globals().get("STEADY_SPEED_PX", 0.6))    # avg corner speed threshold
+
+import numpy as _np
+
+def _quad_to_bbox(q):
+    q = _np.asarray(q, dtype=_np.float32)
+    xs, ys = q[:,0], q[:,1]
+    return _np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=_np.float32)
+
+def _bbox_iou(a, b):
+    ax1, ay1, ax2, ay2 = a; bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    ua = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter + 1e-6
+    return float(inter/ua)
+
+class CardTracker:
+    def __init__(self):
+        self.locked = False
+        self.steady = False
+        self.q = None               # filtered quad (4x2)
+        self.v = None               # velocity per corner (4x2)
+        self.missed = 0
+        self.seen = 0
+        self.frames_since_update = 0
+        self.bbox = None
+
+    def reset(self):
+        self.__init__()
+
+    def predict(self):
+        # simple constant-velocity prediction
+        if self.q is None or self.v is None: 
+            return self.q
+        self.q = self.q + self.v
+        self.frames_since_update += 1
+        return self.q
+
+    def update(self, meas_quad):
+        """Supply measurement quad (4x2) or None if not available this frame.
+        Returns (stable_quad or None, locked, steady).
+        """
+        if meas_quad is None:
+            # no measurement: predict a few frames, then drop
+            if self.locked and self.frames_since_update < PREDICT_HOLD:
+                self.predict()
+                self.missed += 1
+            else:
+                self.reset()
+            self._refresh_flags()
+            return (self.q, self.locked, self.steady)
+
+        m = _np.asarray(meas_quad, dtype=_np.float32)
+        if m.shape != (4,2):
+            self._refresh_flags()
+            return (self.q, self.locked, self.steady)
+
+        if self.q is None:
+            # initialize
+            self.q = m.copy()
+            self.v = _np.zeros_like(m)
+            self.frames_since_update = 0
+            self.seen = 1
+            self.missed = 0
+            self.bbox = _quad_to_bbox(self.q)
+            # not locked yet; require few frames
+            self._refresh_flags()
+            return (self.q, self.locked, self.steady)
+
+        # gating: require IoU overlap to accept measurement if already locked
+        iou_ok = True
+        if self.locked:
+            iou_ok = _bbox_iou(self.bbox, _quad_to_bbox(m)) >= LOCK_IOU_THRESH
+
+        # alpha-beta per corner with deadband
+        if iou_ok:
+            diff = m - self.q
+            # deadband: ignore tiny changes
+            mag = _np.linalg.norm(diff, axis=1, keepdims=True)
+            mask = (mag >= TRACK_DEADBAND_PX).astype(_np.float32)
+            corr = mask * diff
+            # velocity + position updates
+            self.v = (1.0 - TRACK_BETA) * self.v + TRACK_BETA * corr
+            self.q = (1.0 - TRACK_ALPHA) * self.q + TRACK_ALPHA * (self.q + corr)
+            self.frames_since_update = 0
+            self.missed = 0
+            self.seen += 1
+            self.bbox = _quad_to_bbox(self.q)
+        else:
+            # reject: just predict; count as miss
+            self.predict()
+            self.missed += 1
+
+        self._refresh_flags()
+        return (self.q, self.locked, self.steady)
+
+    def _refresh_flags(self):
+        # lock after enough consecutive accepted updates
+        if self.seen >= ACQUIRE_FRAMES and self.missed == 0:
+            self.locked = True
+        # drop lock if too many misses
+        if self.missed >= DROP_MISS_FRAMES:
+            self.reset()
+            return
+        # steady when average corner speed is tiny and recently updated
+        if self.q is not None and self.v is not None and self.frames_since_update == 0:
+            speed = float(_np.mean(_np.linalg.norm(self.v, axis=1)))
+            self.steady = speed <= STEADY_SPEED_PX
+        else:
+            self.steady = False
+
+# global tracker instance
+card_tracker = CardTracker()
+
+
+# --- Warp framing controls ---
+# Expand the quad outward slightly before warping (de-zooms). 0.0 = none.
+WARP_EXPAND_PCT = float(globals().get("WARP_EXPAND_PCT", 0.01))
+# Extra protective padding so the final warp always keeps a slight border.
+WARP_EDGE_PAD_PCT = float(globals().get("WARP_EDGE_PAD_PCT", 0.018))
+# Additional crop after warp (keep at 0.0 to avoid auto-zoom).
+WARP_CROP_PCT   = float(globals().get("WARP_CROP_PCT", 0.0))
+# Edge trim applied by refine_card_quad’s warp (kept tiny so crop view is not zoomed)
+REFINE_WARP_EDGE_CROP_PCT = float(globals().get("REFINE_WARP_EDGE_CROP_PCT", 0.004))
+
+# --- Quad smoothing thresholds ---
+QUAD_FREEZE_THRESH = float(globals().get("QUAD_FREEZE_THRESH", 1.6))   # px; under this reuse last crop
+QUAD_BLEND_THRESH  = float(globals().get("QUAD_BLEND_THRESH", 4.2))    # px; under this blend crops
+
 last_scan_ts = 0.0
 
 tracks = OrderedDict()
@@ -429,6 +571,7 @@ scanner_state = {
     "locked_frames": 0,
     "locked_area": 0.0,
     "steady": False,
+    "steady_relaxed": False,
     "foil": False,
     "foil_score": 0.0,
 }
@@ -444,11 +587,6 @@ _scry_img_cache = {}
 SCRYFALL_CARD_NAMES = []
 SCRYFALL_CARD_NAMES_LOWER = set()
 SCRYFALL_SET_CODES = set()
-
-APPEARANCE_ALIGN_ENABLE   = globals().get("APPEARANCE_ALIGN_ENABLE", True)
-APPEARANCE_AB_STRENGTH    = globals().get("APPEARANCE_AB_STRENGTH", 0.55)  # 0..1, chroma transfer strength
-APPEARANCE_SAT_STRENGTH   = globals().get("APPEARANCE_SAT_STRENGTH", 0.65) # 0..1, HSV S scaling strength
-APPEARANCE_GAMMA_CLAMP    = globals().get("APPEARANCE_GAMMA_CLAMP", (0.65, 1.6))
 
 # Where to save exported decklists (on the device running this app)
 EXPORT_DIR = globals().get("EXPORT_DIR", "./exports")
@@ -474,6 +612,22 @@ try:
     ALWAYS_SCAN_OK = bool(globals().get("ALWAYS_SCAN_OK", True))
 except Exception:
     ALWAYS_SCAN_OK = True
+try:
+    STEADY_RELAX_FRAMES = int(globals().get("STEADY_RELAX_FRAMES", 6))
+except Exception:
+    STEADY_RELAX_FRAMES = 6
+try:
+    STEADY_FORCE_CAPTURE_S = float(globals().get("STEADY_FORCE_CAPTURE_S", 12.0))
+except Exception:
+    STEADY_FORCE_CAPTURE_S = 12.0
+try:
+    MATCH_REQUIRE_ORB = bool(globals().get("MATCH_REQUIRE_ORB", True))
+except Exception:
+    MATCH_REQUIRE_ORB = True
+try:
+    MATCH_ORB_FAIL_THRESHOLD = float(globals().get("MATCH_ORB_FAIL_THRESHOLD", 0.0))
+except Exception:
+    MATCH_ORB_FAIL_THRESHOLD = 0.0
 
 # --- AI name ROI padding + topline join tuning (read from config if present) ---
 # --- Number-band padding (left-biased) ---
@@ -493,6 +647,15 @@ try:
 except Exception:
     pass
 bad_cards = deque(maxlen=500)
+
+try:
+    HISTORY_API_DEFAULT_LIMIT = int(globals().get("HISTORY_API_DEFAULT_LIMIT", 200))
+except Exception:
+    HISTORY_API_DEFAULT_LIMIT = 200
+try:
+    HISTORY_API_MAX_LIMIT = int(globals().get("HISTORY_API_MAX_LIMIT", 2000))
+except Exception:
+    HISTORY_API_MAX_LIMIT = 2000
 
 # ======= Review / History (persistent + in-memory) =======
 scan_history = []          # newest-first
@@ -844,19 +1007,6 @@ def _get_rapid_engine():
             _rapidocr_engine = None
     return _rapidocr_engine
 
-def _get_price(ag, key):
-    """Return a price string from ag['scry']['prices'][key] (e.g., 'usd', 'usd_foil', 'eur', 'tix')."""
-    try:
-        prices = _get(ag, "prices") or {}
-        v = prices.get(key)
-        if v in (None, "", "null"):
-            return ""
-        # normalize to plain string; Archidekt accepts raw decimal text
-        return f"{float(v):.2f}"
-    except Exception:
-        return ""
-
-
 def order_points(pts):
     rect = np.zeros((4,2), dtype='float32')
     s = pts.sum(axis=1)
@@ -865,17 +1015,73 @@ def order_points(pts):
     rect[1], rect[3] = pts[np.argmin(d)], pts[np.argmax(d)]
     return rect
 
+
+def _expand_quad(quad, pct, img_w=None, img_h=None):
+    try:
+        import numpy as _np
+        q = _np.asarray(quad, dtype=_np.float32)
+        if q.shape != (4,2): 
+            return quad
+        if pct <= 0.0:
+            return q
+        cx, cy = _np.mean(q, axis=0)
+        v = q - _np.array([cx, cy], dtype=_np.float32)
+        q2 = _np.array([cx, cy], dtype=_np.float32) + (1.0 + pct) * v
+        # clamp to image bounds if provided
+        if img_w is not None and img_h is not None:
+            q2[:,0] = _np.clip(q2[:,0], 0, img_w-1)
+            q2[:,1] = _np.clip(q2[:,1], 0, img_h-1)
+        return q2.astype('float32')
+    except Exception:
+        return quad
+
 def warp_card(frame, quad):
-    M = cv2.getPerspectiveTransform(
-        quad.astype('float32'),
-        np.array([[0,0],[CARD_W-1,0],[CARD_W-1,CARD_H-1],[0,CARD_H-1]], dtype='float32')
-    )
+    import numpy as np
+    h, w = frame.shape[:2]
+    # expand a touch to avoid zoomed look
+    pad_pct = max(0.0, float(WARP_EXPAND_PCT) + float(WARP_EDGE_PAD_PCT))
+    src_q = _expand_quad(np.asarray(quad, dtype=np.float32), pad_pct, w, h)
+    dst = np.array([[0,0],[CARD_W-1,0],[CARD_W-1,CARD_H-1],[0,CARD_H-1]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(src_q.astype('float32'), dst)
     warped = cv2.warpPerspective(frame, M, (CARD_W, CARD_H))
-    px = int(CARD_W * 0.01); py = int(CARD_H * 0.01)
-    warped = warped[py:CARD_H-py, px:CARD_W-px]
-    warped = cv2.resize(warped, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
+    # optional crop (keep at 0.0 to avoid auto-zoom)
+    if WARP_CROP_PCT > 0:
+        px = int(CARD_W * WARP_CROP_PCT); py = int(CARD_H * WARP_CROP_PCT)
+        if px or py:
+            warped = warped[py:CARD_H-py, px:CARD_W-px]
+            warped = cv2.resize(warped, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
     warped = _auto_orient_upright(warped)
     return warped
+
+def _stabilize_quad(new_quad, prev_quad=None):
+    """
+    Force a consistent point order and blend with the previous quad to suppress jitter/twist.
+    """
+    try:
+        q = order_points(np.asarray(new_quad, dtype=np.float32))
+    except Exception:
+        return new_quad
+    if prev_quad is None:
+        return q
+    try:
+        prev = order_points(np.asarray(prev_quad, dtype=np.float32))
+        delta = float(np.mean(np.linalg.norm(q - prev, axis=1)))
+        alpha = 0.30 + min(0.45, delta / 18.0)  # 0.30..0.75 weight on new quad
+        alpha = min(max(alpha, 0.30), 0.75)
+        return (alpha * q + (1.0 - alpha) * prev).astype(np.float32)
+    except Exception:
+        return q
+
+def _quad_delta(a, b):
+    try:
+        pa = np.asarray(a, dtype=np.float32)
+        pb = np.asarray(b, dtype=np.float32)
+        if pa.shape != (4,2) or pb.shape != (4,2):
+            return None
+        return float(np.max(np.linalg.norm(pa - pb, axis=1)))
+    except Exception:
+        return None
+
 def refine_card_quad(frame, init_quad=None, prev_quad=None):
     try:
         H, W = frame.shape[:2]
@@ -935,16 +1141,21 @@ def refine_card_quad(frame, init_quad=None, prev_quad=None):
         if prev_quad is not None:
             prev = np.array(prev_quad, dtype=np.float32)
             if prev.shape == best.shape:
-                alpha = 1.0
+                # adapt smoothing: tiny deltas => dampen jitter, big deltas => follow quickly
+                delta = float(np.mean(np.linalg.norm(best - prev, axis=1)))
+                alpha = 0.25 + min(0.55, delta / 12.0)  # clamp to 0.25..0.80
+                alpha = min(max(alpha, 0.25), 0.80)
                 best = (alpha*best + (1.0-alpha)*prev).astype(np.float32)
 
         # produce warp as well for immediate OCR
         M = cv2.getPerspectiveTransform(best.astype('float32'),
                                         np.array([[0,0],[CARD_W-1,0],[CARD_W-1,CARD_H-1],[0,CARD_H-1]], dtype='float32'))
         warp = cv2.warpPerspective(frame, M, (CARD_W, CARD_H))
-        px = int(CARD_W * 0.01); py = int(CARD_H * 0.01)
-        warp = warp[py:CARD_H-py, px:CARD_W-px]
-        warp = cv2.resize(warp, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
+        px = int(CARD_W * REFINE_WARP_EDGE_CROP_PCT)
+        py = int(CARD_H * REFINE_WARP_EDGE_CROP_PCT)
+        if px or py:
+            warp = warp[py:CARD_H-py, px:CARD_W-px]
+            warp = cv2.resize(warp, (CARD_W, CARD_H), interpolation=cv2.INTER_AREA)
         warp = _auto_orient_upright(warp)
         return best, warp
     except Exception:
@@ -1050,24 +1261,89 @@ def _prep_roi_for_ocr(roi_bgr):
     sharpened = cv2.addWeighted(g, 1.5, blurred, -0.5, 0)
     return cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4)
 
+def _iter_set_hint_rois(roi_bgr):
+    """Yield progressively tighter crops where the printed set code usually lives."""
+    if roi_bgr is None or getattr(roi_bgr, "size", 0) == 0:
+        return
+    yield roi_bgr
+    try:
+        h, w = roi_bgr.shape[:2]
+        if h <= 0 or w <= 0:
+            return
+        # Bottom-left quadrant: covers set code + collector number label
+        y0 = int(0.55 * h)
+        x1 = int(0.55 * w)
+        if (x1 - 0) > 6 and (h - y0) > 6:
+            yield roi_bgr[y0:h, 0:x1]
+        # Tight region around the actual three-letter code (left of card number)
+        y1 = h
+        y0b = max(0, int(0.68 * h))
+        x0b = max(0, int(0.02 * w))
+        x1b = min(w, int(0.42 * w))
+        if (x1b - x0b) > 6 and (y1 - y0b) > 6:
+            yield roi_bgr[y0b:y1, x0b:x1b]
+    except Exception:
+        pass
+
+def _iter_number_rois(card_bgr):
+    """Yield candidate ROIs that may contain the collector number."""
+    if card_bgr is None or getattr(card_bgr, "size", 0) == 0:
+        return
+    base_rois = [
+        ROI_NUMBER_WIDE,
+        ROI_NUMBER_TALL,
+        ROI_NUMBER_MAIN,
+        ROI_NUMBER_NARROW,
+    ]
+    yielded = 0
+    for roi in base_rois:
+        crop = _roi_rel(card_bgr, roi)
+        if crop is None or getattr(crop, "size", 0) == 0:
+            continue
+        yielded += 1
+        yield crop
+    if _ai_enabled():
+        roi = _ai_crop(card_bgr, "set_name", pad_x=_AI_CARD_PAD_RIGHT, pad_y=_AI_CARD_PAD_Y)
+        if roi is not None and getattr(roi, "size", 0) > 0:
+            yielded += 1
+            yield roi
+            try:
+                h, w = roi.shape[:2]
+                if h > 6 and w > 6:
+                    sub = roi[max(0, int(0.45 * h)):h, :]
+                    if getattr(sub, "size", 0) > 0:
+                        yield sub
+                    left = roi[max(0, int(0.5 * h)):h, 0:max(1, int(0.55 * w))]
+                    if getattr(left, "size", 0) > 0:
+                        yield left
+            except Exception:
+                pass
+    if yielded == 0:
+        # last resort: full card crop
+        yield card_bgr
+
 def _fast_read_set_hint(roi_bgr):
     try:
-        if roi_bgr is None or roi_bgr.size == 0:
-            return ""
-        g = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-        g = cv2.resize(g, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
-        _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-        raw = ""
-        try:
-            import pytesseract
-            cfg = '--oem 1 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ -c load_system_dawg=0 -c load_freq_dawg=0'
-            raw = pytesseract.image_to_string(b, config=cfg, lang='eng') or ""
-        except Exception:
-            pass
-        m = re.search(r'\b([A-Z]{3})\b', (raw or '').upper())
-        return (m.group(1).lower() if m else "")
+        for sub in _iter_set_hint_rois(roi_bgr):
+            if sub is None or sub.size == 0:
+                continue
+            g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+            g = cv2.resize(g, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+            _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+            raw = ""
+            try:
+                import pytesseract
+                cfg = '--oem 1 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c load_system_dawg=0 -c load_freq_dawg=0'
+                raw = pytesseract.image_to_string(b, config=cfg, lang='eng') or ""
+            except Exception:
+                pass
+            if raw:
+                m = re.search(r'\b([A-Z0-9]{2,5})\b', (raw or '').upper())
+                if m:
+                    return (m.group(1).lower() if m else "")
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _fast_read_number(roi_bgr):
@@ -1098,6 +1374,23 @@ def _fast_read_number(roi_bgr):
         return "", 0.0
     except Exception:
         return "", 0.0
+
+def _collector_candidate_score(token: str, conf: float) -> float:
+    """Rough quality score so we can decide between fast/slow OCR results."""
+    if not token:
+        return -1.0
+    digits = len(re.findall(r"\d", str(token)))
+    if digits == 0:
+        return -1.0
+    slash_bonus = 2.0 if "/" in str(token) else 0.0
+    conf_bonus = max(0.0, min(float(conf or 0.0), 100.0)) / 50.0
+    return digits * 1.2 + slash_bonus + conf_bonus
+
+def _prefer_collector_candidate(cur_token, cur_conf, new_token, new_conf):
+    """Return whichever collector number candidate looks more like a valid value."""
+    if _collector_candidate_score(new_token, new_conf) > _collector_candidate_score(cur_token, cur_conf):
+        return new_token, new_conf
+    return cur_token, cur_conf
 
 
 def _read_text_general(bin_img):
@@ -1363,58 +1656,6 @@ def _num_tokens_from_text(raw: str):
     for tok in sorted(best.keys(), key=prio, reverse=True):
         yield tok, best[tok]
 
-def _current_settings_effective():
-    """
-    Snapshot of the *actual* values in use (env > settings.json > defaults).
-    Returned as plain key/value pairs for the Settings UI.
-    """
-    try:
-        from . import config as cfg
-    except ImportError:
-        import config as cfg
-        keys = [
-            # Camera
-            "CAMERA_DEVICE","REQ_WIDTH","REQ_HEIGHT","REQ_FPS","FOURCC_PRIMARY","FOURCC_FALLBACK",
-            # Processing / Canvas
-            "PROC_MAX_WIDTH","CARD_W","CARD_H","MIN_CARD_AREA_RATIO","MAX_CARD_AREA_RATIO",
-            "BORDER_MARGIN_PCT","CARD_ASPECT","ASPECT_TOL","CONFIRM_FRAMES","STALE_FRAMES",
-            "MAX_ASSOC_DIST","MAX_CARDS",
-            # Autoscan / Steady
-            "STEADY_MIN_FRAMES","AUTO_CAPTURE_WAIT_S","AUTOSCAN_OCR_TIMEOUT",
-            "AUTOSCAN_SCRY_TIMEOUT","AUTOSCAN_IMG_TIMEOUT",
-            # Detection cadence/robustness
-            "DETECT_EVERY_N_FRAMES","RECTANGULARITY_MIN",
-            # OCR & Debug
-            "OCR_BACKEND","OCR_ONLY_ON_SNAPSHOT","DEBUG_OCR","OCR_DEBUG_BOXES","SHOW_ROI_OVERLAY",
-            "MIN_TITLE_LETTERS","TEXT_PRESENCE_MIN","TITLE_ALLOW_TESS_FALLBACK",
-            # Foil
-            "FOIL_DETECT","FOIL_MIN_SCORE","FOIL_ON_TH","FOIL_OFF_TH",
-            # Match
-            "MATCH_ENABLE","MATCH_W_HASH","MATCH_W_HIST","MATCH_W_ORB","MATCH_TH","NAME_OK_TH",
-            "ALWAYS_SCAN_OK","MATCH_USE_ART",
-            # Scryfall / Prices
-            "SCRYFALL_TIMEOUT","FX_URL","FX_TTL_SEC",
-            # Moonraker
-            "MOONRAKER_URL","HTTP_POST_URL",
-            # ROIs
-            "ROI_TITLE_TOP","ROI_TITLE_ALT","ROI_NUMBER_MAIN","ROI_NUMBER_WIDE",
-            "ROI_NUMBER_TALL","ROI_NUMBER_NARROW","ROI_ART",
-            # Paths / Server
-            "DEBUG_LEVEL","DEBUG_SAVE_ROI","DEBUG_DIR","BAD_DIR",
-            "HISTORY_DIR","HISTORY_IMG_DIR","HISTORY_JSON_EXT",
-            "JPEG_QUALITY_SNAP","JPEG_QUALITY_CMP","JPEG_QUALITY_THUMB",
-            "HOST","PORT",
-        ]
-        out = {}
-        for k in keys:
-            if hasattr(cfg, k):
-                v = getattr(cfg, k)
-                if isinstance(v, tuple): v = list(v)
-                out[k] = v
-        return out
-
-
-
 def _orig_read_collector_number(img, foil: bool = False):
     rois = [ROI_NUMBER_NARROW, ROI_NUMBER_MAIN, ROI_NUMBER_TALL, ROI_NUMBER_WIDE]
     best_roi = None
@@ -1615,13 +1856,6 @@ def _fix_rect_aspect(rect, target_aspect=CARD_ASPECT, grow_limit=1.06):
     new_w, new_h = (hr_t, wr_t) if flip else (wr_t, hr_t)
     return ((cx, cy), (float(new_w), float(new_h)), float(ang))
 
-def _largest_external_contour(bin_img):
-    cnts, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return max(cnts, key=cv2.contourArea) if cnts else None
-
-def _rect_to_box(rect):
-    return order_points(cv2.boxPoints(rect).astype(np.float32))
-
 def _illum_norm_gray(bgr_small: np.ndarray) -> np.ndarray:
     g  = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2GRAY)
     bg = cv2.GaussianBlur(g, (31, 31), 0)
@@ -1783,20 +2017,54 @@ def _blackhat_bin(gray: np.ndarray) -> np.ndarray:
     _, th = cv2.threshold(bh, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
     return th
 
+def _apply_gamma_u8(channel: np.ndarray, gamma: float) -> np.ndarray:
+    if channel is None or channel.size == 0 or gamma <= 0.0:
+        return channel
+    if abs(gamma - 1.0) < 1e-3:
+        return channel
+    ch = channel.astype(np.float32) / 255.0
+    ch = np.power(np.clip(ch, 0.0, 1.0), gamma)
+    return np.clip(ch * 255.0, 0, 255).astype(np.uint8)
+
+def _reduce_specular_highlights(bgr: np.ndarray) -> np.ndarray:
+    if bgr is None or bgr.size == 0:
+        return bgr
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    spec_mask = ((v > FOIL_SPEC_VAL_THRESHOLD) & (s < FOIL_SPEC_SAT_THRESHOLD)).astype(np.uint8)
+    if FOIL_SPEC_DILATE > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FOIL_SPEC_DILATE, FOIL_SPEC_DILATE))
+        spec_mask = cv2.dilate(spec_mask, k, iterations=1)
+    if np.any(spec_mask):
+        mask = cv2.GaussianBlur(spec_mask * 255, (5,5), 0).astype(bool)
+        v_blur = cv2.GaussianBlur(v, (5,5), 0)
+        v_suppressed = ((v.astype(np.float32) * 0.35) + (v_blur.astype(np.float32) * 0.65)).astype(np.uint8)
+        v = np.where(mask, v_suppressed, v)
+        s = np.where(mask, (s.astype(np.float32) * 0.55).clip(0,255).astype(np.uint8), s)
+    hsv2 = cv2.merge([h, s, v])
+    return cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
+
 def _enhance_for_foil(roi_bgr: np.ndarray) -> np.ndarray:
     if roi_bgr is None or roi_bgr.size == 0:
         return np.zeros((1,1,3), dtype=np.uint8)
-    lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+    bgr = cv2.bilateralFilter(roi_bgr, 5, 35, 35)
+    bgr = _reduce_specular_highlights(bgr)
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.5, tileGridSize=(8,8))
+    clahe = cv2.createCLAHE(clipLimit=FOIL_CLAHE_CLIP, tileGridSize=(FOIL_CLAHE_TILE, FOIL_CLAHE_TILE))
     l2 = clahe.apply(l)
     lab2 = cv2.merge([l2, a, b])
     bgr = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
-    s = (s.astype(np.float32) * 0.6).clip(0,255).astype(np.uint8)
+    s = (s.astype(np.float32) * FOIL_SAT_SCALE).clip(0,255).astype(np.uint8)
+    v = _apply_gamma_u8(v, FOIL_GAMMA)
     hsv2 = cv2.merge([h, s, v])
-    return cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
+    bgr = cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
+    if FOIL_UNSHARP_AMOUNT > 0.0:
+        blur = cv2.GaussianBlur(bgr, (0,0), sigmaX=1.1)
+        bgr = cv2.addWeighted(bgr, 1.0 + FOIL_UNSHARP_AMOUNT, blur, -FOIL_UNSHARP_AMOUNT, 0)
+    return bgr
 
 def _orig_ocr_from_card_upright(img):
     roi_top = _crop_title_roi_top(img)
@@ -2130,6 +2398,58 @@ def _set_code_from_set_name(name_raw):
     except Exception:
         return ""
 # --- end set-name fallback ---
+
+def _resolve_set_hint(card_bgr, initial_hint="", name_hint="", allow_band_scan=True):
+    """Consolidate set-hint extraction (band OCR, icon match, set-name OCR)."""
+    hint = (initial_hint or "").strip().lower()
+    # 1) Direct OCR of the "set_name" ROI (where the three-letter code usually lives)
+    try:
+        if not hint:
+            roi = _ai_crop(card_bgr, "set_name") if _ai_enabled() else None
+            if roi is not None and getattr(roi, "size", 0) > 0:
+                hint = (_read_set_hint(roi) or "").strip().lower()
+                if hint:
+                    _dbg("SET_HINT", f"set_hint<-set_name_roi = {hint}")
+                    return hint
+    except Exception:
+        pass
+    # 2) OCR the full collector band (optional when laziness disabled)
+    try:
+        if (not hint) and allow_band_scan:
+            roi = _ai_crop(card_bgr, "card") if _ai_enabled() else None
+            if roi is None or getattr(roi, "size", 0) == 0:
+                roi = _roi_rel(card_bgr, ROI_NUMBER_WIDE)
+            if roi is not None and getattr(roi, "size", 0) > 0:
+                hint = (_read_set_hint(roi) or "").strip().lower()
+                if hint:
+                    _dbg("SET_HINT", f"set_hint<-band = {hint}")
+                    return hint
+    except Exception:
+        pass
+    if hint:
+        return hint
+    # 3) OCR the printed set name and map to a code (cheap text lookup)
+    try:
+        if globals().get("SET_NAME_FALLBACK_ENABLE", True):
+            nm = _read_set_name_roi(card_bgr)
+            code2 = _set_code_from_set_name(nm)
+            if code2:
+                hint = code2.strip().lower()
+                _dbg("SET_NAME", f"set_hint<-name = {hint}")
+                return hint
+    except Exception as _e:
+        _dbg("SET_NAME", f"name->code fallback failed: {_e}")
+    # 4) Only if everything else failed, run expensive set-icon matching
+    try:
+        if globals().get("SET_ICON_FALLBACK_ENABLE", True):
+            code, score = _match_set_symbol_to_code(card_bgr, name_hint=(name_hint or ""))
+            if code:
+                hint = code.strip().lower()
+                _dbg("SET_ICON", f"set_hint<-icon = {hint}")
+                return hint
+    except Exception as _e:
+        _dbg("SET_ICON", f"fallback failed: {_e}")
+    return hint
 
 def ocr_from_card_upright(img):
     # Use original OCR pipeline (now AI-aware title + numbers via overrides)
@@ -2540,17 +2860,6 @@ def _dhash64(img):
 def _hamming64(a, b):
     return bin((a ^ b) & ((1<<64)-1)).count("1")
 
-def _hist_sim(bgrA, bgrB):
-    hsvA = cv2.cvtColor(bgrA, cv2.COLOR_BGR2HSV)
-    hsvB = cv2.cvtColor(bgrB, cv2.COLOR_BGR2HSV)
-    def hist(hsv):
-        h = cv2.calcHist([hsv],[0],None,[32],[0,180]); s = cv2.calcHist([hsv],[1],None,[32],[0,256])
-        cv2.normalize(h, h); cv2.normalize(s, s); return h, s
-    hA,sA = hist(hsvA); hB,sB = hist(hsvB)
-    cH = cv2.compareHist(hA, hB, cv2.HISTCMP_CORREL)
-    cS = cv2.compareHist(sA, sB, cv2.HISTCMP_CORREL)
-    return float((cH + 1.0) * 0.5 * 0.6 + (cS + 1.0) * 0.5 * 0.4)
-
 def _normalize_illum(bgr):
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
@@ -2658,10 +2967,13 @@ def compare_snapshot_to_scryfall(snap_bgr, scry_bgr, return_details=False, scry_
     fast_accept = (sim_hash >= 0.90 and sim_hist >= 0.85)
     fast_reject = (sim_hash <= 0.40 and sim_hist <= 0.50)
 
-    if (fast_accept or fast_reject) and not return_details:
+    fast_accept_allowed = not MATCH_REQUIRE_ORB
+    if fast_accept and fast_accept_allowed and not return_details:
         score = MATCH_W_HASH * sim_hash + MATCH_W_HIST * sim_hist
-        ok = fast_accept
-        return float(score), ok
+        return float(score), True
+    if fast_reject and not return_details:
+        score = MATCH_W_HASH * sim_hash + MATCH_W_HIST * sim_hist
+        return float(score), False
 
     # 3) ORB (use cached reference keypoints/descriptors if available)
     sim_orb, good, orb_dbg = 0.0, [], None
@@ -2675,7 +2987,8 @@ def compare_snapshot_to_scryfall(snap_bgr, scry_bgr, return_details=False, scry_
 
     # Full weighted score
     score = MATCH_W_HASH * sim_hash + MATCH_W_HIST * sim_hist + MATCH_W_ORB * sim_orb
-    ok = bool(score >= MATCH_TH)
+    orb_gate = bool(MATCH_REQUIRE_ORB and sim_orb <= (MATCH_ORB_FAIL_THRESHOLD + 1e-6))
+    ok = False if orb_gate else bool(score >= MATCH_TH)
 
     if not return_details:
         return float(score), ok
@@ -2686,6 +2999,7 @@ def compare_snapshot_to_scryfall(snap_bgr, scry_bgr, return_details=False, scry_
         "sim_orb":  float(sim_orb),
         "score":    float(score),
         "ok":       ok,
+        "orb_gate": orb_gate,
         "weights": {"hash": MATCH_W_HASH, "hist": MATCH_W_HIST, "orb": MATCH_W_ORB},
         "orb_dbg": {"A": A_orb, "B": ref_feats.get("B_orb") if ref_feats.get("B_orb") is not None else None, "orb_data": orb_dbg}
     }
@@ -2966,7 +3280,7 @@ def video_thread():
         _dbg("CAMERA ERROR", f"Could not open camera {CAMERA_DEVICE}")
         return
     _dbg("CAMERA INFO", f"{int(cap.get(3))}x{int(cap.get(4))} @ {cap.get(5):.1f}fps")
-    scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False})
+    scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False, 'steady_relaxed': False})
     frame_i = 0
 
     # Initialize the local ROI version we've seen so far
@@ -2982,7 +3296,7 @@ def video_thread():
                 with tracks_lock:
                     tracks.clear()
                 with video_lock:
-                    scanner_state.update({'locked': False, 'locked_frames': 0, 'steady': False})
+                    scanner_state.update({'locked': False, 'locked_frames': 0, 'steady': False, 'steady_relaxed': False})
                 roi_ver_seen = rv
 
             if PROC_PAUSED:
@@ -3063,7 +3377,7 @@ def detect_worker():
             with tracks_lock:
                 tracks.clear()
             with video_lock:
-                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False})
+                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False, 'steady_relaxed': False})
                 current_card_crop = None
             roi_ver_seen = rv
 
@@ -3125,30 +3439,71 @@ def detect_worker():
 
         # Update crop + scanner state
         if locked is not None:
+            tracker_quad = None
+            tracker_steady = True
+            try:
+                tracker_quad, _, tracker_steady = card_tracker.update(locked['box'])
+            except Exception:
+                tracker_quad = None
+                tracker_steady = True
+
+            init_quad = tracker_quad if tracker_quad is not None else locked['box']
             try:
                 # refine the quad for cropping without affecting locking/steady logic
                 prev_q = None
+                prev_crop = None
                 with video_lock:
                     prev_q = current_card_quad
-                refined_q, refined_warp = refine_card_quad(frame, init_quad=locked['box'], prev_quad=prev_q)
+                    prev_crop = current_card_crop
+                refined_q, refined_warp = refine_card_quad(frame, init_quad=init_quad, prev_quad=prev_q)
                 if refined_q is not None and refined_warp is not None:
+                    if tracker_quad is not None:
+                        tracker_arr = np.asarray(tracker_quad, dtype=np.float32)
+                        refined_q = (0.65 * refined_q + 0.35 * tracker_arr).astype(np.float32)
+                        refined_warp = warp_card(frame, refined_q)
                     crop = refined_warp
                     use_quad = refined_q
                 else:
-                    crop = warp_card(frame, locked['box'])
-                    use_quad = locked['box']
+                    fallback_quad = prev_q if prev_q is not None else init_quad
+                    if fallback_quad is not None:
+                        crop = warp_card(frame, fallback_quad)
+                        use_quad = fallback_quad
+                    else:
+                        crop = None
+                        use_quad = None
             except Exception:
                 crop = None
                 use_quad = None
+            if use_quad is not None:
+                stabilized = _stabilize_quad(use_quad, prev_q)
+                if stabilized is not None:
+                    use_quad = stabilized
+                    crop = warp_card(frame, use_quad) if frame is not None else crop
+                delta = _quad_delta(use_quad, prev_q)
+                if delta is not None and prev_crop is not None and crop is not None:
+                    try:
+                        if delta <= QUAD_FREEZE_THRESH:
+                            crop = prev_crop.copy()
+                        elif delta <= QUAD_BLEND_THRESH and prev_crop.shape == crop.shape:
+                            crop = cv2.addWeighted(prev_crop, 0.6, crop, 0.4, 0)
+                    except Exception:
+                        pass
+
             with video_lock:
                 current_card_crop = crop
                 current_card_quad = use_quad
-                steady = locked.get('seen', 0) >= STEADY_MIN_FRAMES
+                base_steady = locked.get('seen', 0) >= STEADY_MIN_FRAMES
+                relax_ready = (
+                    base_steady and STEADY_RELAX_FRAMES > 0 and
+                    locked.get('seen', 0) >= (STEADY_MIN_FRAMES + STEADY_RELAX_FRAMES)
+                )
+                steady = base_steady and (bool(tracker_steady) or relax_ready)
                 scanner_state.update({
                     'locked': True,
                     'locked_frames': locked.get('seen', 0),
                     'locked_area': locked.get('area', 0.0),
-                    'steady': steady
+                    'steady': steady,
+                    'steady_relaxed': bool(relax_ready and not tracker_steady)
                 })
 
             # Update YOLOv5 ROI detector (throttled)
@@ -3174,9 +3529,13 @@ def detect_worker():
                 scanner_state.pop("foil", None)
                 scanner_state.pop("foil_score", None)
         else:
+            try:
+                card_tracker.update(None)
+            except Exception:
+                pass
             with video_lock:
                 current_card_crop = None
-                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0.0, 'steady': False})
+                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0.0, 'steady': False, 'steady_relaxed': False})
 
         frame_i += 1
 def ocr_worker():
@@ -3489,7 +3848,15 @@ def autoscan_manager():
         GRACE = float(globals().get("STEADY_GRACE_S", 2.5))
         WATCHDOG = float(globals().get("STEADY_WATCHDOG_S", 6.0))
         t_grace = time.time()
+        wait_start = t_grace
         steady = False
+        forced_capture = False
+        def _force_timeout_elapsed():
+            if STEADY_FORCE_CAPTURE_S is None:
+                return False
+            if STEADY_FORCE_CAPTURE_S <= 0:
+                return False
+            return (time.time() - wait_start) >= STEADY_FORCE_CAPTURE_S
         _dbg("AUTOSCAN", f"waiting for steady: grace={GRACE:.1f}s watchdog={WATCHDOG:.1f}s (job={job})")
         # Grace period: wait quietly for steady
         while not shutdown_evt.is_set():
@@ -3499,17 +3866,25 @@ def autoscan_manager():
                 break
             if time.time() - t_grace >= GRACE:
                 break
+            if _force_timeout_elapsed():
+                forced_capture = True
+                _dbg("AUTO-WATCHDOG", f"forcing capture after {time.time() - wait_start:.1f}s without steady (job={job})")
+                break
             time.sleep(0.02)
             with printer_lock:
                 if not printer_state.get("awaiting", False):
                     break
         # After grace, enforce a bounded watchdog window
-        if not steady:
+        if not steady and not forced_capture:
             t_watch = time.time()
             while not shutdown_evt.is_set():
                 with video_lock:
                     steady = bool(scanner_state.get("steady", False))
                 if steady:
+                    break
+                if _force_timeout_elapsed():
+                    forced_capture = True
+                    _dbg("AUTO-WATCHDOG", f"forcing capture after {time.time() - wait_start:.1f}s without steady (job={job})")
                     break
                 if time.time() - t_watch > WATCHDOG:
                     _dbg("AUTO-WATCHDOG", f"still not steady after {GRACE+WATCHDOG:.1f}s → extending wait (job={job})")
@@ -3519,9 +3894,9 @@ def autoscan_manager():
                     if not printer_state.get("awaiting", False):
                         break
                 time.sleep(0.02)
-                # 3) Small grace period then capture a snapshot
-                #_dbg("AUTOSCAN", f"steady={steady} → capturing in {AUTO_CAPTURE_WAIT_S:.2f}s (job={job})")
-                #_dbg("AUTOSCAN", f"state: awaiting={pending} locked={scanner_state.get('locked', False)} steady_frames={scanner_state.get('locked_frames',0)}")
+        if forced_capture and not steady:
+            _dbg("AUTOSCAN", f"Proceeding without steady lock after {time.time() - wait_start:.1f}s (job={job})")
+        # 3) Small grace period then capture a snapshot
         time.sleep(AUTO_CAPTURE_WAIT_S)
         ok = capture_scanned_card_from_live()
 
@@ -3879,28 +4254,6 @@ def api_logs_clear():
         LOG_RING.clear()
     return jsonify({"ok": True})
 
-def load_settings_file():
-    try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except FileNotFoundError:
-        return {}
-    except Exception:
-        return {}
-
-def save_settings_file(data: dict):
-    os.makedirs(os.path.dirname(os.path.abspath(SETTINGS_PATH)), exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-
-def parse_roi_csv(s: str):
-    try:
-        nums = [float(x.strip()) for x in str(s).split(",")]
-        if len(nums) == 4: return nums
-    except Exception:
-        pass
-    return None
-
 @app.get("/ui.js")
 def serve_ui_js():
     path = os.path.join(APP_DIR, "ui.js")
@@ -4059,11 +4412,7 @@ def api_set_detect_roi():
         if not isinstance(cur, dict):
             cur = {}
         cur["DETECT_ROI"] = [x0, y0, x1, y1]
-        try:
-            _settings_save(cur)
-        except Exception:
-            # fallback to legacy helper if present
-            save_settings_file(cur)
+        _settings_save(cur)
     except Exception as e:
         _dbg("SETTINGS ERROR", f"save DETECT_ROI failed: {e}")
 
@@ -4091,168 +4440,6 @@ def api_carddata():
 def api_bad():
     return jsonify({"items": list(bad_cards), "count": len(bad_cards)})
 
-# --- Photometric normalization (WB + tone match to reference) ---
-
-TONE_ALIGN_ENABLE = globals().get("TONE_ALIGN_ENABLE", False)
-
-def _gray_world_wb(bgr: np.ndarray) -> np.ndarray:
-    """
-    Simple gray-world white balance. Fast and robust for cheap LED color casts.
-    """
-    if bgr is None or bgr.size == 0:
-        return bgr
-    img = bgr.astype(np.float32)
-    b, g, r = cv2.split(img)
-    eps = 1e-6
-    mean_b, mean_g, mean_r = b.mean() + eps, g.mean() + eps, r.mean() + eps
-    gray = (mean_b + mean_g + mean_r) / 3.0
-    kb, kg, kr = gray/mean_b, gray/mean_g, gray/mean_r
-    b *= kb; g *= kg; r *= kr
-    out = cv2.merge((b, g, r))
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-def _build_lut_from_cdfs(cdf_src: np.ndarray, cdf_ref: np.ndarray) -> np.ndarray:
-    """
-    Given two 256-length CDFs (0..1), build a uint8 LUT that maps src->ref.
-    """
-    lut = np.zeros(256, dtype=np.uint8)
-    j = 0
-    for i in range(256):
-        while j < 255 and cdf_ref[j] < cdf_src[i]:
-            j += 1
-        lut[i] = j
-    return lut
-
-def _u8_cdf(u8: np.ndarray) -> np.ndarray:
-    hist = cv2.calcHist([u8],[0],None,[256],[0,256]).ravel().astype(np.float64)
-    cdf  = hist.cumsum()
-    if cdf[-1] <= 0:  # avoid div-by-zero
-        return np.linspace(0, 1, 256, dtype=np.float64)
-    return cdf / cdf[-1]
-
-def _match_l_to_reference(src_bgr: np.ndarray, ref_bgr: np.ndarray) -> np.ndarray:
-    """
-    Histogram-match the L channel of src to ref in LAB space.
-    Keeps A/B as-is to avoid weird hue shifts.
-    """
-    if src_bgr is None or ref_bgr is None or src_bgr.size == 0 or ref_bgr.size == 0:
-        return src_bgr
-
-    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB)
-    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB)
-    Ls, As, Bs = cv2.split(src_lab)
-    Lr, _,  _  = cv2.split(ref_lab)
-
-    # Guard degenerate cases; fall back to linear percentile matching
-    std_s = float(Ls.std()); std_r = float(Lr.std())
-    if std_s < 1.5 or std_r < 1.5:
-        # percentile-based affine (robust to speculars)
-        s_lo, s_hi = np.percentile(Ls, [3, 97])
-        r_lo, r_hi = np.percentile(Lr, [3, 97])
-        scale = (r_hi - r_lo) / max(1.0, (s_hi - s_lo))
-        offset = r_lo - scale * s_lo
-        Lm = np.clip(Ls.astype(np.float32) * scale + offset, 0, 255).astype(np.uint8)
-    else:
-        cdf_s = _u8_cdf(Ls)
-        cdf_r = _u8_cdf(Lr)
-        lut = _build_lut_from_cdfs(cdf_s, cdf_r)
-        Lm = cv2.LUT(Ls, lut)
-
-    out_lab = cv2.merge((Lm, As, Bs))
-    return cv2.cvtColor(out_lab, cv2.COLOR_LAB2BGR)
-
-def _tone_align_to_reference(src_bgr: np.ndarray, ref_bgr: np.ndarray) -> np.ndarray:
-    """
-    Full photometric align: gray-world WB then L-channel histogram match.
-    """
-    if src_bgr is None or ref_bgr is None:
-        return src_bgr
-    src = _gray_world_wb(src_bgr)
-    ref = _gray_world_wb(ref_bgr)
-    return _match_l_to_reference(src, ref)
-
-def _estimate_whitepoint(bgr: np.ndarray):
-    """Robust white estimate: bright & low-sat cluster; fallback to gray-world."""
-    if bgr is None or bgr.size == 0: return (1.0, 1.0, 1.0)
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    mask = ((s < 35) & (v > 200))
-    if int(mask.sum()) < 600:  # fallback: top 0.5% brightest, lenient sat
-        thr = np.percentile(v, 99.5)
-        mask = (v >= thr) & (s < 60)
-    region = bgr[mask] if np.any(mask) else bgr.reshape(-1,3)
-    wp = region.astype(np.float32).mean(axis=0)  # B,G,R
-    return tuple(np.clip(wp, 1.0, 255.0))
-
-def _whitepoint_align(src_bgr: np.ndarray, ref_bgr: np.ndarray) -> np.ndarray:
-    """Von Kries/diagonal gains to map src white → ref white."""
-    if src_bgr is None or ref_bgr is None: return src_bgr
-    swb = np.array(_estimate_whitepoint(src_bgr), dtype=np.float32)
-    rwb = np.array(_estimate_whitepoint(ref_bgr), dtype=np.float32)
-    gains = (rwb / np.maximum(swb, 1e-3)).reshape(1,1,3)
-    out = src_bgr.astype(np.float32) * gains
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-def _percentile_gamma_match_l(src_bgr: np.ndarray, ref_bgr: np.ndarray) -> np.ndarray:
-    """Match L using two percentiles + a gentle gamma to align the midtone."""
-    if src_bgr is None or ref_bgr is None: return src_bgr
-    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB); Ls, As, Bs = cv2.split(src_lab)
-    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB); Lr, _, _  = cv2.split(ref_lab)
-
-    s_lo, s_md, s_hi = np.percentile(Ls, [5, 50, 95]).astype(np.float32)
-    r_lo, r_md, r_hi = np.percentile(Lr, [5, 50, 95]).astype(np.float32)
-    # normalize to 0..1 within robust range
-    n = np.clip((Ls.astype(np.float32) - s_lo) / max(1.0, (s_hi - s_lo)), 0, 1)
-    s_md_n = np.clip((s_md - s_lo) / max(1.0, (s_hi - s_lo)), 1e-3, 1-1e-3)
-    r_md_n = np.clip((r_md - r_lo) / max(1.0, (r_hi - r_lo)), 1e-3, 1-1e-3)
-    # gamma so that median maps to median
-    g = float(np.log(r_md_n) / np.log(s_md_n))
-    g = float(np.clip(g, APPEARANCE_GAMMA_CLAMP[0], APPEARANCE_GAMMA_CLAMP[1]))
-    n = np.power(n, g)
-    Lm = (n * (r_hi - r_lo) + r_lo).astype(np.uint8)
-    out_lab = cv2.merge((Lm, As, Bs))
-    return cv2.cvtColor(out_lab, cv2.COLOR_LAB2BGR)
-
-def _reinhard_ab_transfer(src_bgr: np.ndarray, ref_bgr: np.ndarray, strength=0.6) -> np.ndarray:
-    """Soft chroma transfer on A/B (means+stds), blended by strength."""
-    if src_bgr is None or ref_bgr is None: return src_bgr
-    s_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB); Ls, As, Bs = cv2.split(s_lab)
-    r_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2LAB); _, Ar, Br = cv2.split(r_lab)
-
-    def _match(ch_s, ch_r):
-        s = ch_s.astype(np.float32); r = ch_r.astype(np.float32)
-        ms, ss = float(s.mean()), float(s.std() + 1e-6)
-        mr, sr = float(r.mean()), float(r.std() + 1e-6)
-        out = (s - ms) * (sr / ss) + mr
-        return np.clip(out, 0, 255).astype(np.uint8)
-
-    A_t = _match(As, Ar); B_t = _match(Bs, Br)
-    # Blend so we don't overdrive hues
-    A_o = cv2.addWeighted(As, 1.0 - strength, A_t, strength, 0)
-    B_o = cv2.addWeighted(Bs, 1.0 - strength, B_t, strength, 0)
-    return cv2.cvtColor(cv2.merge((Ls, A_o, B_o)), cv2.COLOR_LAB2BGR)
-
-def _match_saturation_to_ref(src_bgr: np.ndarray, ref_bgr: np.ndarray, strength=0.65) -> np.ndarray:
-    """Scale HSV S to bring medians closer; blended by strength."""
-    if src_bgr is None or ref_bgr is None: return src_bgr
-    shsv = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    rhsv = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    s_src = np.percentile(shsv[:,:,1], 50)
-    s_ref = np.percentile(rhsv[:,:,1], 50)
-    if s_src <= 1e-3: return src_bgr
-    k = float(np.clip(s_ref / s_src, 0.6, 1.6))
-    S_new = np.clip(shsv[:,:,1] * (1.0 + strength*(k-1.0)), 0, 255)
-    shsv[:,:,1] = S_new
-    return cv2.cvtColor(shsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-def _appearance_match_to_reference(src_bgr: np.ndarray, ref_bgr: np.ndarray) -> np.ndarray:
-    """Full appearance alignment: WP → tone → chroma(A/B) → saturation."""
-    if src_bgr is None or ref_bgr is None: return src_bgr
-    x = _whitepoint_align(src_bgr, ref_bgr)
-    x = _percentile_gamma_match_l(x, ref_bgr)
-    x = _reinhard_ab_transfer(x, ref_bgr, strength=APPEARANCE_AB_STRENGTH)
-    x = _match_saturation_to_ref(x, ref_bgr, strength=APPEARANCE_SAT_STRENGTH)
-    return x
 
 def capture_scanned_card_from_live():
     global scanned_card, last_scan_ts, snapshot_seq, preview_card
@@ -4632,13 +4819,6 @@ def _settings_save(data: dict):
     with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
 
-def _parse_roi_csv(s: str):
-    try:
-        vals = [float(x.strip()) for x in str(s).split(",")]
-        return vals if len(vals) == 4 else None
-    except Exception:
-        return None
-
 # ---- Settings helpers (single source of truth) ----
 # (removed duplicate definition of _settings_load)
 
@@ -4663,6 +4843,8 @@ def _effective_settings():
         "STEADY_MIN_FRAMES": STEADY_MIN_FRAMES, "AUTO_CAPTURE_WAIT_S": AUTO_CAPTURE_WAIT_S,
         "AUTOSCAN_OCR_TIMEOUT": AUTOSCAN_OCR_TIMEOUT, "AUTOSCAN_SCRY_TIMEOUT": AUTOSCAN_SCRY_TIMEOUT,
         "AUTOSCAN_IMG_TIMEOUT": AUTOSCAN_IMG_TIMEOUT,
+        "STEADY_RELAX_FRAMES": STEADY_RELAX_FRAMES,
+        "STEADY_FORCE_CAPTURE_S": STEADY_FORCE_CAPTURE_S,
         # OCR & Debug
         "OCR_BACKEND": OCR_BACKEND, "OCR_ONLY_ON_SNAPSHOT": OCR_ONLY_ON_SNAPSHOT,
         "DEBUG_OCR": DEBUG_OCR, "OCR_DEBUG_BOXES": OCR_DEBUG_BOXES, "SHOW_ROI_OVERLAY": SHOW_ROI_OVERLAY,
@@ -4674,6 +4856,7 @@ def _effective_settings():
         # Match
         "MATCH_ENABLE": MATCH_ENABLE, "MATCH_W_HASH": MATCH_W_HASH, "MATCH_W_HIST": MATCH_W_HIST,
         "MATCH_W_ORB": MATCH_W_ORB, "MATCH_TH": MATCH_TH, "NAME_OK_TH": NAME_OK_TH,
+        "MATCH_REQUIRE_ORB": MATCH_REQUIRE_ORB, "MATCH_ORB_FAIL_THRESHOLD": MATCH_ORB_FAIL_THRESHOLD,
         "ALWAYS_SCAN_OK": ALWAYS_SCAN_OK, "MATCH_USE_ART": MATCH_USE_ART,
         # Prices
         "SCRYFALL_TIMEOUT": SCRYFALL_TIMEOUT, "FX_URL": FX_URL, "FX_TTL_SEC": FX_TTL_SEC,
@@ -4691,6 +4874,8 @@ def _effective_settings():
         "HISTORY_DIR": HISTORY_DIR, "HISTORY_IMG_DIR": HISTORY_IMG_DIR,
         "HISTORY_JSON_EXT": HISTORY_JSON_EXT, "JPEG_QUALITY_SNAP": JPEG_QUALITY_SNAP,
         "JPEG_QUALITY_CMP": JPEG_QUALITY_CMP, "JPEG_QUALITY_THUMB": JPEG_QUALITY_THUMB,
+        "HISTORY_API_DEFAULT_LIMIT": HISTORY_API_DEFAULT_LIMIT,
+        "HISTORY_API_MAX_LIMIT": HISTORY_API_MAX_LIMIT,
         
         # AI / YOLOv5
         "AI_ENABLED": AI_ENABLED, "AI_USE_FOR_CARDS": AI_USE_FOR_CARDS, "AI_USE_FOR_ROIS": AI_USE_FOR_ROIS,
@@ -4875,12 +5060,37 @@ def _apply_scan_filters(rows, F):
         out.append(e)
     return out
 
+def _parse_limit_param(val):
+    if val is None:
+        return None
+    sval = str(val).strip().lower()
+    if not sval:
+        return None
+    if sval in ("all", "*", "max", "infinite", "inf", "unlimited"):
+        return 0
+    try:
+        return int(val)
+    except Exception:
+        return None
+
+def _resolve_history_limit(requested, total_rows):
+    total = max(0, int(total_rows or 0))
+    if total == 0:
+        return 0
+    limit = HISTORY_API_DEFAULT_LIMIT if requested is None else int(requested)
+    if limit <= 0:
+        limit = total
+    max_lim = int(HISTORY_API_MAX_LIMIT or 0)
+    if max_lim > 0:
+        limit = min(limit, max_lim)
+    return max(1, min(limit, total))
+
 @app.route('/api/scans')
 def api_scans():
     a = request.args
     sort_by   = (a.get("sort_by") or "ts").lower()
     sort_dir  = (a.get("sort_dir") or "desc").lower()
-    limit     = max(1, min(500, int(a.get("limit") or 200)))
+    limit_req = _parse_limit_param(a.get("limit"))
     offset    = max(0, int(a.get("offset") or 0))
 
     F = _parse_scan_filters(a)
@@ -4896,7 +5106,11 @@ def api_scans():
     out.sort(key=_key, reverse=(sort_dir!="asc"))
 
     total = len(out)
-    out = out[offset:offset+limit]
+    limit = _resolve_history_limit(limit_req, total)
+    if offset >= total:
+        out = []
+    else:
+        out = out[offset:offset+limit] if limit else []
     items = [{
         "id": e["id"], "ts": e["ts"], "name": e.get("name",""), "number": e.get("number",""),
         "status": e.get("status","fail"), "match_score": e.get("match_score",0.0),
@@ -4907,7 +5121,14 @@ def api_scans():
         "scry_cn":   (e.get("scry") or {}).get("collector_number",""),
         "review_reasons": e.get("review_reasons", []),
     } for e in out]
-    return jsonify({"items": items, "total": total, "offset": offset, "limit": limit})
+    return jsonify({
+        "items": items,
+        "total": total,
+        "count": total,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(items),
+    })
 
 @app.route('/api/scan/<int:sid>/thumb')
 def api_scan_thumb(sid):
@@ -5096,34 +5317,62 @@ def _read_set_hint(roi_bgr: np.ndarray) -> str:
     Returns a lowercased code if it matches known set codes, else "".
     """
     try:
-        if roi_bgr is None or roi_bgr.size == 0:
+        if roi_bgr is None or getattr(roi_bgr, "size", 0) == 0:
             return ""
-        # Build several candidates from different preprocessings
-        candidates = []
+        seen = {}
 
-        # Binary (general OCR)
-        bin_img = _prep_roi_for_ocr(roi_bgr)
-        txt, _, _ = _read_text_general(bin_img)
-        if txt:
-            candidates.append(txt)
+        def _add_candidates(raw: str):
+            if not raw:
+                return
+            for tok in re.findall(r"[A-Z0-9]{2,5}", (raw or "").upper()):
+                seen.setdefault(tok.lower(), True)
 
-        # Color RapidOCR
-        if RAPIDOCR_AVAILABLE and "rapidocr" in OCR_BACKEND:
-            rbgr = _prep_roi_for_rapid_bgr(roi_bgr)
+        for sub in _iter_set_hint_rois(roi_bgr):
+            if sub is None or getattr(sub, "size", 0) == 0:
+                continue
+
+            # Binary (general OCR)
+            bin_img = _prep_roi_for_ocr(sub)
+            txt, _, _ = _read_text_general(bin_img)
+            _add_candidates(txt)
+
+            # Color RapidOCR
+            if RAPIDOCR_AVAILABLE and "rapidocr" in OCR_BACKEND:
+                rbgr = _prep_roi_for_rapid_bgr(sub)
+                try:
+                    eng = _get_rapid_engine()
+                    res = (eng(rbgr)[0] or [])
+                    if res:
+                        _add_candidates(" ".join(r[1] for r in res))
+                except Exception:
+                    pass
+
+            # Strict uppercase Tesseract pass on grayscale
             try:
-                eng = _get_rapid_engine()
-                res = (eng(rbgr)[0] or [])
-                if res:
-                    candidates.append(" ".join(r[1] for r in res))
+                g = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+                g = cv2.resize(g, None, fx=2.1, fy=2.1, interpolation=cv2.INTER_LINEAR)
+                _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+                cfg = '--oem 1 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -c load_system_dawg=0 -c load_freq_dawg=0'
+                raw = pytesseract.image_to_string(b, config=cfg, lang='eng') or ""
+                _add_candidates(raw)
             except Exception:
                 pass
 
-        # Heuristic extraction: 2–5 uppercase letters/digits
-        for raw in candidates:
-            for tok in re.findall(r"[A-Z0-9]{2,5}", (raw or "").upper()):
-                code = tok.lower()
+            code = _fast_read_set_hint(sub)
+            if code:
                 if code in SCRYFALL_SET_CODES:
                     return code
+                _add_candidates(code)
+
+        def _code_score(c: str):
+            exact = 1 if len(c) == 3 else 0
+            length_bias = -abs(len(c) - 3)
+            digits = sum(ch.isdigit() for ch in c)
+            return (exact, length_bias, -digits)
+
+        for code in sorted(seen.keys(), key=_code_score, reverse=True):
+            if code in SCRYFALL_SET_CODES:
+                return code
     except Exception:
         pass
     return ""
@@ -5250,28 +5499,6 @@ def _start_workers():
     threading.Thread(target=autoscan_manager, daemon=True).start()
 
 
-
-# --- Legacy static fallbacks (in case of reverse proxies or path quirks) ---
-@app.get("/ui.js")
-def _legacy_ui_js():
-    return send_from_directory(app.static_folder, "js/ui.js")
-
-@app.get("/app.css")
-def _legacy_app_css():
-    return send_from_directory(app.static_folder, "css/app.css")
-
-# Quick debug endpoint to verify paths on device
-@app.get("/_debug/static")
-def _debug_static():
-    return {
-        "static_folder": app.static_folder,
-        "template_folder": app.template_folder,
-        "ui_js_exists": os.path.exists(os.path.join(app.static_folder, "js", "ui.js")),
-        "css_exists": os.path.exists(os.path.join(app.static_folder, "css", "app.css")),
-    }
-@app.context_processor
-def inject_version():
-    return {"APP_VERSION": APP_VERSION}
 
 @app.get("/api/version")
 def api_version():
@@ -5663,35 +5890,34 @@ def _fast_ocr_from_card_upright(img):
     number_tok, number_conf = "", 0.0
     try:
         if _FAST_CFG.get("FAST_NUM", True):
-            band = _roi_rel(img, ROI_NUMBER_WIDE)
-            number_tok, number_conf = _fast_read_number(band)
-        if not number_tok:
-            number_tok, number_conf = _read_collector_number(img, foil=foil)
+            for roi in _iter_number_rois(img):
+                tok, conf = _fast_read_number(roi)
+                if tok:
+                    number_tok, number_conf = _prefer_collector_candidate(number_tok, number_conf, tok, conf)
+        slow_tok, slow_conf = _read_collector_number(img, foil=foil)
+        number_tok, number_conf = _prefer_collector_candidate(number_tok, number_conf, slow_tok, slow_conf)
     except Exception:
         pass
 
-    set_hint = ""
-    if not _FAST_CFG.get("LAZY_SH", True):
-        try:
-            band = _ai_crop(img, "card") if _ai_enabled() else None
-            if band is None or getattr(band, "size", 0) == 0:
-                band = _roi_rel(img, ROI_NUMBER_WIDE)
-            set_hint = _fast_read_set_hint(band) or ""
-        except Exception:
-            set_hint = ""
+    allow_band_hint = not _FAST_CFG.get("LAZY_SH", True)
+    set_hint = _resolve_set_hint(img, "", name_txt or "", allow_band_scan=allow_band_hint)
 
     if not (name_txt or number_tok):
         if __SLOW_OCR_IMPL:
             return __SLOW_OCR_IMPL(img)
         return {"name":"", "name_raw":"", "name_conf":0.0, "number":"", "number_raw":"", "number_conf":0.0, "set_hint":"", "foil":foil, "foil_score":foil_score}
 
+    number_raw = str(number_tok or "")
+    number_disp = _parse_collector_for_display(number_raw)
+    number_conf = float(number_conf or 0.0) if number_disp else 0.0
+
     out = {
         "name": "",
         "name_raw": name_txt or "",
         "name_conf": float(name_conf or 0.0),
-        "number": str(number_tok or ""),
-        "number_raw": str(number_tok or ""),
-        "number_conf": float(number_conf or 0.0),
+        "number": number_disp,
+        "number_raw": number_raw,
+        "number_conf": number_conf,
         "set_hint": set_hint or "",
         "foil": bool(foil),
         "foil_score": float(foil_score or 0.0),
