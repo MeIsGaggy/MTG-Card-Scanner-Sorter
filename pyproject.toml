@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mtg-scanner"
-version = "0.1.5"   # <-- change this line
+version = "0.2.0"   # <-- change this line
 description = "MTG card scanner web app (Flask + OpenCV)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,8 +18,8 @@ dependencies = [
   "opencv-python>=4.8",
   "numpy>=1.24",
   "requests>=2.31",
+  "paddleocr>=2.7",
   "rapidocr-onnxruntime>=1.3",
-  "pytesseract>=0.3",
   "rapidfuzz>=3.5",
   "websocket-client>=1.6",
 ]

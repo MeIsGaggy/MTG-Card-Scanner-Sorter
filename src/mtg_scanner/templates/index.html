@@ -15,22 +15,28 @@
         <div class="media-wrap">
           <div id="liveWrap" style="position:relative;width:100%;height:100%;">
             <img id="live" src="/live" alt="Live stream">
-            <div id="roiOverlay" aria-label="Detection area">
-              <div class="h nw"></div><div class="h ne"></div><div class="h se"></div><div class="h sw"></div>
+            <svg id="manualCropSvg" class="manual-crop-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <polygon id="manualCropPoly" points="15,10 85,10 85,90 15,90"></polygon>
+              <circle class="manual-handle" id="manualHandle0" data-idx="0" r="1.2"></circle>
+              <circle class="manual-handle" id="manualHandle1" data-idx="1" r="1.2"></circle>
+              <circle class="manual-handle" id="manualHandle2" data-idx="2" r="1.2"></circle>
+              <circle class="manual-handle" id="manualHandle3" data-idx="3" r="1.2"></circle>
+            </svg>
+            <div class="manual-hint">
+              <div class="manual-hint__text">Drag corners to set your crop area.</div>
+              <div class="manual-hint__actions">
+                <button id="btnManualReset" class="btn btn-mini btn-ghost">Reset</button>
+                <span id="manualSaved" class="manual-saved">Saved</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="row" style="visibility: hidden;">
-          <button id="roiReset" title="Use full frame">ROI: Full Frame</button>
-          <small id="roiReadout" style="opacity:.8">ROI 0–100%</small>
-          <span style="flex:1"></span>
         </div>
       </div>
     </div>
 
     <!-- Detected -->
     <div class="panel crop">
-      <h2>Detected Card</h2>
+      <h2>Card Crop</h2>
       <div class="content">
         <div class="media-wrap"><img id="card" src="/card" alt="Detected card"></div>
         <div id="ocr" class="row"></div>
@@ -38,14 +44,17 @@
     </div>
 
     <!-- Card Info -->
-    <div class="panel info1">
-      <h2>Card Info & Prices</h2>
-      <div class="content"><div id="cardinfo"></div></div>
+    <div class="panel info1" id="cardinfo-panel">
+      <div class="panel-head">
+        <h2>Scryfall API Results</h2>
+        <button id="cardinfo-toggle" class="btn btn-mini btn-ghost-custom" aria-expanded="true">Collapse</button>
+      </div>
+      <div class="content" id="cardinfo-content"><div id="cardinfo"></div></div>
     </div>
 
     <!-- Status -->
     <div class="panel status-panel" id="status">
-      <h2>Connection Status & Processing</h2>
+      <h2>Connection Status & Logs</h2>
       <div class="content" style="gap:12px">
         <div id="scanner" class="row pillbar"></div>
         <div id="printer1" class="row pillbar"></div>
@@ -86,6 +95,8 @@
           <button id="btnMarkPass">Pass</button>
           <button id="btnMarkFail">Fail</button>
           <button id="btnEdit">Edit</button>
+          <button id="btnReprocess">Reprocess</button>
+          <button id="btnReprocessBatch">Batch Reprocess</button>
           <button id="btnDelete" class="danger">Delete</button>
           <button id="btn-open-history" class="btn btn-pill">All History…</button>
           <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
@@ -103,34 +114,40 @@
   </div>
   </div>
 
+  <!-- Floating restore for Card Info when collapsed -->
+  <button id="cardinfo-restore" class="btn btn-pill btn-expand-scry" aria-expanded="false">Expand Scryfall Data</button>
+
   
   <!-- Fullscreen History Modal -->
-  <div id="history-modal" class="mm-modal hidden fullscreen" aria-hidden="true">
-    <div class="mm-modal__header">
+  <div id="history-modal" class="mm-modal hidden history-popup" aria-hidden="true"
+       style="position:fixed;top:20px;bottom:20px;left:50%;transform:translate(-50%,0);width:min(1200px,calc(100vw - 40px));max-width:calc(100vw - 40px);height:calc(100vh - 40px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;z-index:100;">
+    <div class="mm-modal__header" style="position:sticky;top:0;z-index:1;">
       <div class="mm-title">All History</div>
       <button class="btn btn-pill" id="history-filter">Filters…</button>
       <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
     </div>
-    <div class="mm-modal__body">
-      <div id="history-grid" class="history-grid" aria-label="All history grid"></div>
+    <div class="mm-modal__body" style="flex:1 1 auto;min-height:0;overflow:auto;padding:16px;">
+      <div id="history-grid" class="history-grid history-grid-inline" aria-label="All history grid"></div>
     </div>
   </div>
 
   <!-- History Item Options Modal -->
-  <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;" aria-hidden="true">
+  <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px; z-index:120;" aria-hidden="true">
     <div class="mm-modal__header">
       <div class="mm-title">Choose Action</div>
       <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
     </div>
-    <div class="mm-modal__body">
-      <div class="mm-grid" style="grid-template-columns: 1fr;">
+        <div class="mm-modal__body">
+          <div class="mm-grid" style="grid-template-columns: 1fr;">
         <button class="btn btn-pill btn-primary" id="histopt-pass">Mark Pass</button>
         <button class="btn btn-pill"              id="histopt-fail">Mark Fail</button>
+        <button class="btn btn-pill"              id="histopt-review">Mark Review</button>
         <button class="btn btn-pill"              id="histopt-edit">Edit…</button>
-        <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
+        <button class="btn btn-pill"              id="histopt-reprocess">Reprocess…</button>
+            <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
 
   <!-- Edit modal -->
   <div id="editModal" class="modal" aria-hidden="true">
@@ -142,9 +159,9 @@
       </div>
       <div class="body">
         <div class="row">
-          <input id="eiName" placeholder="Name" style="flex:1;min-width:120px;">
-          <input id="eiSet"  placeholder="Set code (e.g. tdm)" style="width:130px;">
-          <input id="eiNum"  placeholder="Collector #" style="width:130px;">
+          <input id="eiName" class="input" placeholder="Name" style="flex:1;min-width:120px;">
+          <input id="eiSet"  class="input" placeholder="Set code (e.g. tdm)" style="width:130px;">
+          <input id="eiNum"  class="input" placeholder="Collector #" style="width:130px;">
           <button id="eiSearch">Search</button>
           <button id="eiApply">Apply</button>
         </div>
@@ -153,9 +170,80 @@
     </div>
   </div>
 
+  <!-- Reprocess modal -->
+  <div id="reprocessModal" class="modal" aria-hidden="true">
+    <div class="backdrop"></div>
+    <div class="card reprocess-card" role="dialog" aria-modal="true" aria-labelledby="reprocessTitle">
+      <div class="head">
+        <strong id="reprocessTitle">Reprocess Card</strong>
+        <button class="close" id="reprocessClose" aria-label="Close">×</button>
+      </div>
+      <div class="body">
+        <div id="reprocessStatus" class="reprocess-status">Preparing…</div>
+        <div class="progress-block">
+          <span>Progress</span>
+          <div class="progress"><div id="reprocessProgressBar"></div></div>
+        </div>
+        <div class="reprocess-cols hidden" id="reprocessContent">
+          <div class="reproc-col">
+            <h3>Current Result</h3>
+            <div class="reproc-field"><span>Name</span><strong id="reOldName">—</strong></div>
+            <div class="reproc-field"><span>Set</span><strong id="reOldSet">—</strong></div>
+            <div class="reproc-field"><span>Number</span><strong id="reOldNumber">—</strong></div>
+            <div class="reproc-field"><span>Match</span><strong id="reOldScore">—</strong></div>
+            <div class="reproc-field"><span>Flagged</span><strong id="reOldFlag">—</strong></div>
+            <img id="reOldCmp" class="reproc-img hidden" alt="Current comparison">
+            <ul id="reOldReasons" class="reproc-reasons"></ul>
+          </div>
+          <div class="reproc-col">
+            <h3>New Detection</h3>
+            <div class="reproc-field"><span>Name</span><strong id="reNewName">—</strong></div>
+            <div class="reproc-field sub"><span>Suggested</span><em id="reNewScry">—</em></div>
+            <div class="reproc-field"><span>Set</span><strong id="reNewSet">—</strong></div>
+            <div class="reproc-field"><span>Number</span><strong id="reNewNumber">—</strong></div>
+            <div class="reproc-field"><span>Match</span><strong id="reNewScore">—</strong></div>
+            <div class="reproc-field"><span>Flagged</span><strong id="reNewFlag">—</strong></div>
+            <img id="reNewCmp" class="reproc-img hidden" alt="New comparison">
+            <ul id="reNewReasons" class="reproc-reasons"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="foot">
+        <button id="reprocessReject">Cancel</button>
+        <button id="reprocessApply" class="btn btn-primary" disabled>Accept New Result</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Reprocess modal -->
+  <div id="reprocessBatchModal" class="modal" aria-hidden="true">
+    <div class="backdrop"></div>
+    <div class="card reprocess-card" role="dialog" aria-modal="true" aria-labelledby="reprocessBatchTitle">
+      <div class="head">
+        <strong id="reprocessBatchTitle">Batch Reprocess (Flagged Cards)</strong>
+        <button class="close" id="reprocessBatchClose" aria-label="Close">×</button>
+      </div>
+      <div class="body">
+        <div id="reprocessBatchStatus" class="reprocess-status">Preparing…</div>
+        <div class="progress-block">
+          <span>Batch Progress</span>
+          <div class="progress"><div id="reprocessBatchOverallBar"></div></div>
+        </div>
+        <div class="progress-block">
+          <span>Current Card</span>
+          <div class="progress alt"><div id="reprocessBatchCurrentBar"></div></div>
+        </div>
+        <div id="reprocessBatchList" class="reproc-batch-list hidden" aria-live="polite"></div>
+      </div>
+      <div class="foot">
+        <button id="reprocessBatchDone">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Filter Modal -->
   <div id="filter-backdrop" class="mm-backdrop hidden"></div>
-  <div id="filter-modal" class="mm-modal hidden">
+  <div id="filter-modal" class="mm-modal hidden" style="z-index:130;">
     <div class="mm-modal__header">
       <div class="mm-title">Filter History</div>
       <button class="btn btn-pill btn-ghost" id="filter-close">✕</button>
@@ -168,7 +256,7 @@
             <option value="all" selected>All</option>
             <option value="pass">Pass</option>
             <option value="fail">Fail</option>
-            <option value="flagged">Flagged</option>
+            <option value="review">Review</option>
           </select>
         </label>
         <label class="mm-field">
@@ -356,6 +444,33 @@
 </div>
 
 
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('btn-open-printer');
+      const modal = document.getElementById('printer-modal');
+      const closeButtons = [
+        document.getElementById('printer-close'),
+        document.getElementById('printer-close2')
+      ].filter(Boolean);
+      const backdrop = document.getElementById('filter-backdrop');
+
+      const openModal = () => {
+        if (!modal) return;
+        modal.classList.remove('hidden');
+        if (backdrop) backdrop.classList.remove('hidden');
+      };
+      const closeModal = () => {
+        if (!modal) return;
+        modal.classList.add('hidden');
+        if (backdrop) backdrop.classList.add('hidden');
+      };
+
+      btn?.addEventListener('click', (e) => { e.preventDefault(); openModal(); });
+      closeButtons.forEach((el) => el.addEventListener('click', (e) => { e.preventDefault(); closeModal(); }));
+      modal?.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) closeModal(); });
+    });
+  </script>
   <script>
     (function(){
       var s = document.createElement('script');

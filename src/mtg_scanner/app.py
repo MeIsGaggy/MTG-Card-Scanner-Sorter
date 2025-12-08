@@ -4,7 +4,7 @@ try:
 except NameError:
     import time as _time
     _BOOT_LOG = []
-    def _dbg(tag, msg, level=1):
+    def _dbg(tag, msg, level=3):
         try:
             # Suppress time-debug logs with PERF tag even during bootstrap
             if str(tag).strip().upper().startswith('PERF'):
@@ -17,13 +17,10 @@ except NameError:
             except Exception:
                 pass
     def _dbg2(tag, msg):
-        _dbg(tag, msg, 2)
+        _dbg(tag, msg, 4)
 # --- end bootstrap stub ---
 
 #!/usr/bin/env python3
-import time as _t
-_BOOT_LOG = []
-
 import os
 from .update import get_current_version, check_for_update_async
 
@@ -197,39 +194,6 @@ try:
 except Exception:
     pass
 
-log_lock = threading.Lock()
-LOG_RING = deque(maxlen=1200)
-LOG_SEQ = 0
-
-
-def _push_log(tag: str, msg: str, level: int = 1):
-    """Store a console line for the UI, with a severity level."""
-    global LOG_SEQ
-    try:
-        t = str(tag or "")
-        m = str(msg or "")
-        lvl = int(level or 1) 
-
-        U = (t + " " + m).upper()
-        if ("ERROR" in U) or ("EXCEPTION" in U) or ("TRACEBACK" in U):
-            lvl = max(lvl, 4)
-        elif "WARN" in U:                     
-            lvl = max(lvl, 3)
-        elif ("SCAN_OK" in U) or ("SUCCESS" in U) or ("CONNECTED" in U):
-            lvl = min(lvl, 0)              
-
-        with log_lock:
-            LOG_SEQ += 1
-            LOG_RING.append({
-                "id":  LOG_SEQ,
-                "ts":  time.time(),
-                "tag": t,
-                "msg": m,
-                "lvl": int(lvl),
-            })
-    except Exception:
-        pass
-
 def _scryfall_lookup_once(name, number_raw, set_hint, seq):
     """Ensure only one thread performs a Scryfall lookup for the same (seq,name,number,set_hint)."""
     key = (seq, name or "", number_raw or "", set_hint or "")
@@ -266,25 +230,34 @@ def _scryfall_lookup_once(name, number_raw, set_hint, seq):
 # SECTION: Logging (colorized, unified)
 # =======================================
 # Provides a single logger used across the app:
-#   _dbg(tag, msg, level=1)   -> normal
-#   _dbg2(tag, msg)           -> verbose (level=2)
-# Features:
-#   - Boot buffering: logs before initialization are captured and replayed.
-#   - Colorized [TAG] only (no 'INFO/OK/ERROR' words), color encodes severity.
-#   - Severity inference from content and 'level' for UI and console.
+#   _dbg(tag, msg, level=DBG_INFO)  -> info by default
+#   _dbg2(tag, msg)                 -> debug (DBG_DEBUG)
+# Levels:
+#   1=errors, 2=warnings, 3=info, 4=debug/noisy dev logs
+# Green “success” lines (imports, loaded, connected, ready, etc) always print.
 import sys as _sys, time as _time
+
+DBG_ERROR = 1
+DBG_WARN  = 2
+DBG_INFO  = 3
+DBG_DEBUG = 4
 
 try:
     _BOOT_LOG
 except NameError:
-    _BOOT_LOG = []                         # (level, ts, tag, msg)
-_LOG_READY = False                     # flip after full init
+    _BOOT_LOG = []                         # (level, ts, tag, msg[, sev])
+_LOG_READY = False                         # flip after full init
+
+_SUCCESS_TOKENS = ("SUCCESS", "IMPORTED", "IMPORT", "LOADED", "CONNECTED", "READY", "SCAN_OK", "ONLINE", "ATTACHED", "ENABLED", "AVAILABLE")
+_ERROR_TOKENS   = ("ERROR", "EXCEPTION", "TRACEBACK", "CRITICAL", "FAIL")
+_WARN_TOKENS    = ("WARN", "WARNING", "DEPRECATED", "RETRY")
 
 # ANSI palette (simple; cross-platform terminals handle these now)
 _ANSI = {
     "reset": "\033[0m",
     "ok":    "\033[32m",   # green
     "info":  "\033[36m",   # cyan
+    "debug": "\033[90m",   # grey
     "warn":  "\033[33m",   # yellow
     "err":   "\033[31m",   # red
 }
@@ -297,15 +270,50 @@ def _supports_color():
     except Exception:
         return False
 
-def _infer_severity(tag: str, msg: str, level: int) -> str:
-    T = f"{tag or ''} {msg or ''}".upper()
-    if ("ERROR" in T) or ("EXCEPTION" in T) or ("TRACEBACK" in T) or level >= 4:
-        return "err"
-    if ("WARN" in T) or ("DEPRECATED" in T):
-        return "warn"
-    if ("SCAN_OK" in T) or ("READY" in T) or ("CONNECTED" in T) or ("LOADED" in T) or ("SUCCESS" in T) or level <= 0:
+def _normalize_level(tag: str, msg: str, level_hint) -> int:
+    """Translate legacy level hints into the 1..4 scale and infer errors/warnings."""
+    try:
+        lvl = int(level_hint if level_hint is not None else DBG_INFO)
+    except Exception:
+        lvl = DBG_INFO
+
+    explicit = lvl in (DBG_ERROR, DBG_WARN, DBG_INFO, DBG_DEBUG)
+    if not explicit:
+        # Legacy mapping: callers historically used 1 (normal) / 2 (verbose)
+        if lvl <= 0:
+            lvl = DBG_INFO
+        elif lvl == 1:
+            lvl = DBG_INFO
+        else:
+            lvl = DBG_DEBUG
+
+    txt = f"{tag or ''} {msg or ''}".upper()
+    if any(t in txt for t in _ERROR_TOKENS):
+        lvl = DBG_ERROR
+    elif any(t in txt for t in _WARN_TOKENS):
+        lvl = max(lvl, DBG_WARN)
+
+    return max(min(lvl, DBG_DEBUG), DBG_ERROR)
+
+def _infer_severity(tag: str, msg: str, level: int = None) -> str:
+    lvl = _normalize_level(tag, msg, level if level is not None else DBG_INFO)
+    txt = f"{tag or ''} {msg or ''}".upper()
+    if any(t in txt for t in _SUCCESS_TOKENS):
         return "ok"
+    if lvl <= DBG_ERROR:
+        return "err"
+    if lvl == DBG_WARN:
+        return "warn"
+    if lvl >= DBG_DEBUG:
+        return "debug"
     return "info"
+
+def _current_debug_level() -> int:
+    try:
+        cur = int(globals().get("DEBUG_LEVEL", DBG_INFO))
+    except Exception:
+        cur = DBG_INFO
+    return max(min(cur, DBG_DEBUG), DBG_ERROR)
 
 # Ring buffer for UI (populated by _push_log)
 from collections import deque
@@ -313,28 +321,35 @@ log_lock = threading.Lock()
 LOG_RING = deque(maxlen=1200)
 LOG_SEQ = 0
 
-def _push_log(tag: str, msg: str, level: int = 1):
-    """Store a line for the UI. Also infers severity."""
+def _push_log(tag: str, msg: str, level: int = DBG_INFO, sev: str = None, ts: float = None):
+    """Store a line for the UI."""
     global LOG_SEQ
     try:
-        sev = _infer_severity(tag, msg, level)
+        lvl = _normalize_level(tag, msg, level)
+        sev = sev or _infer_severity(tag, msg, lvl)
         with log_lock:
             LOG_SEQ += 1
             LOG_RING.append({
                 "id":  LOG_SEQ,
-                "ts":  _time.time(),
+                "ts":  float(ts if ts is not None else _time.time()),
                 "tag": str(tag or ""),
                 "msg": str(msg or ""),
-                "lvl": int(level or 1),
+                "lvl": int(lvl),
                 "sev": sev,
             })
     except Exception:
         pass
 
-def _print_console(tag: str, msg: str, level: int = 1):
+def _should_emit_console(level: int, sev: str) -> bool:
+    # Success lines always show; otherwise honor the DEBUG_LEVEL threshold.
+    if sev == "ok":
+        return True
+    return level <= _current_debug_level()
+
+def _print_console(tag: str, msg: str, level: int = DBG_INFO, sev: str = None):
     """Console print with colored [TAG] only; no extra severity words."""
     try:
-        sev = _infer_severity(tag, msg, level)
+        sev = sev or _infer_severity(tag, msg, level)
         use_color = _supports_color()
         tag_str = f"[{tag}]"
         if use_color:
@@ -350,33 +365,39 @@ def _print_console(tag: str, msg: str, level: int = 1):
         except Exception:
             pass
 
-def _buffer_or_emit(tag, msg, level=1):
-    if not _LOG_READY:
-        _BOOT_LOG.append((level, _time.time(), str(tag), str(msg)))
-    else:
-        _push_log(tag, msg, level)
-        # console print based on DEBUG_LEVEL
-        try:
-            if (level == 1 and DEBUG_LEVEL > 0) or (level == 2 and DEBUG_LEVEL > 1) or (level <= 0):
-                _print_console(tag, msg, level)
-        except Exception:
-            pass
+def _emit_log(tag, msg, level=DBG_INFO, sev: str = None, ts: float = None):
+    lvl = _normalize_level(tag, msg, level)
+    sev = sev or _infer_severity(tag, msg, lvl)
+    _push_log(tag, msg, lvl, sev=sev, ts=ts)
+    if _should_emit_console(lvl, sev):
+        _print_console(tag, msg, lvl, sev=sev)
 
-def _dbg(tag, msg, level=1):
+def _buffer_or_emit(tag, msg, level=DBG_INFO):
+    lvl = _normalize_level(tag, msg, level)
+    sev = _infer_severity(tag, msg, lvl)
+    if not _LOG_READY:
+        _BOOT_LOG.append((lvl, _time.time(), str(tag), str(msg), sev))
+    else:
+        _emit_log(tag, msg, lvl, sev=sev)
+
+def _dbg(tag, msg, level=DBG_INFO):
     _buffer_or_emit(tag, msg, level)
 
 def _dbg2(tag, msg):
-    _buffer_or_emit(tag, msg, level=2)
+    _buffer_or_emit(tag, msg, level=DBG_DEBUG)
 
 def _logger_ready():
     """Replay boot logs and mark the logger ready."""
     global _LOG_READY
     _LOG_READY = True
-    for (level, ts, tag, msg) in list(_BOOT_LOG):
-        _push_log(tag, msg, level)
+    for entry in list(_BOOT_LOG):
         try:
-            if (level == 1 and DEBUG_LEVEL > 0) or (level == 2 and DEBUG_LEVEL > 1) or (level <= 0):
-                _print_console(tag, msg, level)
+            if len(entry) == 5:
+                lvl, ts, tag, msg, sev = entry
+            else:
+                lvl, ts, tag, msg = entry
+                sev = None
+            _emit_log(tag, msg, lvl, sev=sev, ts=ts)
         except Exception:
             pass
     _BOOT_LOG.clear()
@@ -661,6 +682,49 @@ class CardTracker:
 # global tracker instance
 card_tracker = CardTracker()
 
+_steady_ctx = {
+    "prev": None,
+    "blur_ema": None,
+    "motion_ema": None,
+    "ok": False,
+}
+
+
+def _update_steady_state_from_frame(frame):
+    """Blend blur + motion to decide if the live stream is steady."""
+    global _steady_ctx
+    try:
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        target_w = int(globals().get("STEADY_DOWNSCALE_W", 0) or 0)
+        if target_w > 0 and g.shape[1] > target_w:
+            scale = target_w / float(g.shape[1])
+            g = cv2.resize(g, (target_w, int(g.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+        g = cv2.GaussianBlur(g, (3, 3), 0)
+        blur_val = float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+        motion_val = 0.0
+        prev = _steady_ctx.get("prev")
+        if prev is not None and getattr(prev, "shape", None) == g.shape:
+            motion_val = float(cv2.absdiff(g, prev).mean())
+        _steady_ctx["prev"] = g
+
+        alpha = float(globals().get("STEADY_EMA_ALPHA", 0.18) or 0.18)
+        alpha = min(1.0, max(0.01, alpha))
+        blur_prev = _steady_ctx.get("blur_ema")
+        motion_prev = _steady_ctx.get("motion_ema")
+        blur_ema = blur_val if blur_prev is None else ((1.0 - alpha) * blur_prev + alpha * blur_val)
+        motion_ema = motion_val if motion_prev is None else ((1.0 - alpha) * motion_prev + alpha * motion_val)
+        _steady_ctx["blur_ema"] = blur_ema
+        _steady_ctx["motion_ema"] = motion_ema
+
+        blur_ok = blur_ema >= float(globals().get("STEADY_BLUR_VAR_MIN", 45.0))
+        motion_ok = motion_ema <= float(globals().get("STEADY_MOTION_MAX", 3.4))
+        ok = bool(blur_ok and motion_ok)
+        _steady_ctx["ok"] = ok
+        return ok, float(blur_ema), float(motion_ema)
+    except Exception:
+        return bool(_steady_ctx.get("ok", False)), float(_steady_ctx.get("blur_ema") or 0.0), float(_steady_ctx.get("motion_ema") or 0.0)
+
 
 # --- Warp framing controls ---
 # Expand the quad outward slightly before warping (de-zooms). 0.0 = none.
@@ -713,8 +777,8 @@ scanner_state = {
     "steady": False,
     "steady_relaxed": False,
     "steady_promoted": False,
-    "foil": False,
-    "foil_score": 0.0,
+    "steady_blur": 0.0,
+    "steady_motion": 0.0,
 }
 ocr_state = {"provider": PRIMARY_PROVIDER_LABEL}
 cardinfo_state = {}
@@ -1198,6 +1262,11 @@ _AI_SETNAME_MIN_Y = float(globals().get("AI_SETNAME_MIN_Y", 0.70))
 _AI_SETNAME_MAX_Y = float(globals().get("AI_SETNAME_MAX_Y", 0.99))
 _AI_SETNAME_MIN_WIDTH = float(globals().get("AI_SETNAME_MIN_WIDTH", 0.05))
 _AI_SETNAME_MIN_HEIGHT = float(globals().get("AI_SETNAME_MIN_HEIGHT", 0.02))
+# Padding around the AI set-code box so we don't clip letters
+_AI_SET_PAD_LEFT   = float(globals().get("AI_SET_PAD_LEFT", 0.0))
+_AI_SET_PAD_RIGHT  = float(globals().get("AI_SET_PAD_RIGHT", 0.0))
+_AI_SET_PAD_TOP    = float(globals().get("AI_SET_PAD_TOP", 0.0))
+_AI_SET_PAD_BOTTOM = float(globals().get("AI_SET_PAD_BOTTOM", 0.0))
 _AI_CARD_MIN_AREA = float(globals().get("AI_CARD_MIN_AREA", 0.32))
 _AI_CARD_MIN_AREA_STRICT = max(0.12, float(globals().get("AI_CARD_MIN_AREA_STRICT", 0.20)))
 _AI_CARD_MAX_TOP = float(globals().get("AI_CARD_MAX_TOP", 0.20))
@@ -1222,6 +1291,8 @@ scan_history = []          # newest-first
 scan_id_seq = 0
 current_loaded_scan_id = None
 history_lock = threading.Lock()
+seq_entry_map = {}
+timed_out_seqs = set()
 _badlist_lock = threading.Lock()
 # --- post-snapshot pause control (processing pause separate from streaming pause)
 PROC_PAUSED = False
@@ -1422,6 +1493,16 @@ def _load_image(path):
             return f.read()
     except Exception:
         return b""
+
+def _cmp_stats_sanitized(src):
+    out = {}
+    for k, v in (src or {}).items():
+        if k == "orb_dbg":
+            continue
+        if hasattr(v, "shape"):
+            continue
+        out[k] = v
+    return out
 
 def _persist_entry_to_disk(entry: dict):
     """Write per-scan JSON + images. Excludes raw bytes from JSON."""
@@ -1640,7 +1721,7 @@ def _derive_review_outcome(
     }
 
 
-def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, review_decision=None):
+def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, review_decision=None, seq=None, job=None, timed_out=False, late_update=False):
     """Create a review record and persist it."""
     global scan_id_seq, scan_history
     sid = int(time.time()*1000) + (scan_id_seq % 1000)
@@ -1676,21 +1757,30 @@ def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, rev
         ms = float(match_score)
     except Exception:
         ms = 0.0
-    # Strip out any non-JSON-serializable values (e.g. numpy arrays) from cmp_details
-    def _cmp_stats_sanitized(src):
-        out = {}
-        for k, v in (src or {}).items():
-            if k == "orb_dbg":
-                continue
-            # skip numpy arrays / images
-            if hasattr(v, "shape"):
-                continue
-            out[k] = v
-        return out
+
+    def _fallback_name(ocr_obj, scry_obj):
+        nm = (ocr_obj or {}).get("name") or (ocr_obj or {}).get("name_raw") or ""
+        if nm:
+            return nm
+        nm = (scry_obj or {}).get("name") or ""
+        if nm:
+            return nm
+        set_hint = ((ocr_obj or {}).get("set_hint") or (scry_obj or {}).get("set") or "").strip()
+        num_disp = _parse_collector_for_display((ocr_obj or {}).get("number_raw") or (ocr_obj or {}).get("number") or "")
+        if set_hint and num_disp:
+            return f"{set_hint.upper()} #{num_disp}"
+        if set_hint:
+            return set_hint.upper()
+        if num_disp:
+            return f"#{num_disp}"
+        return "Unknown card"
+
+    name_fallback = _fallback_name(ocr, scry)
+
     entry = {
         "id": sid,
         "ts": time.time(),
-        "name": (ocr or {}).get("name") or (ocr or {}).get("name_raw") or "",
+        "name": name_fallback,
         "name_conf": float((ocr or {}).get("name_conf", 0.0)),
         "number": (ocr or {}).get("number") or "",
         "number_raw": (ocr or {}).get("number_raw") or "",
@@ -1712,12 +1802,41 @@ def save_scan_entry(snap_img, ocr, scry, cmp_details, match_score, match_ok, rev
         "auto_name_fix": bool(auto_name_fix),
         "review_level": decision.get("review_level", "info"),
         "scry_match_mode": match_mode or "none",
+        "seq": seq,
+        "job_id": job,
+        "timed_out": bool(timed_out),
+        "late_update": bool(late_update),
     }
 
     with history_lock:
         scan_history.insert(0, entry)
         _persist_entry_to_disk(entry)
     return entry
+
+def _register_seq_entry(seq, sid, timed_out=False):
+    if seq is None:
+        return
+    with history_lock:
+        seq_entry_map[seq] = sid
+        if timed_out:
+            timed_out_seqs.add(seq)
+
+def _mark_seq_resolved(seq):
+    if seq is None:
+        return
+    with history_lock:
+        timed_out_seqs.discard(seq)
+
+def _entry_for_seq(seq):
+    if seq is None:
+        return None
+    with history_lock:
+        sid = seq_entry_map.get(seq)
+        if sid is not None:
+            e = next((e for e in scan_history if e.get("id") == sid), None)
+            if e is not None:
+                return e
+        return next((e for e in scan_history if e.get("seq") == seq), None)
 
 # =========================
 #MARK: UTILITIES
@@ -2122,6 +2241,24 @@ def _prep_roi_for_ocr(roi_bgr):
     sharpened = cv2.addWeighted(g, 1.5, blurred, -0.5, 0)
     return cv2.adaptiveThreshold(sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4)
 
+def _prep_set_code_roi(roi_bgr):
+    """Preprocess tiny set-code text to keep sharp diagonals (helps W vs N/O)."""
+    try:
+        g = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        g = cv2.resize(g, None, fx=3.2, fy=3.2, interpolation=cv2.INTER_CUBIC)
+        g = cv2.bilateralFilter(g, 5, 28, 28)
+        blur = cv2.GaussianBlur(g, (0, 0), 1.25)
+        sharp = cv2.addWeighted(g, 1.7, blur, -0.7, 0)
+        th = cv2.adaptiveThreshold(
+            sharp, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 13, 4
+        )
+        # Light dilation to keep thin strokes visible but avoid filling holes
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 2))
+        th = cv2.morphologyEx(th, cv2.MORPH_DILATE, k, iterations=1)
+        return th, 255 - th
+    except Exception:
+        return None, None
+
 def _prep_number_crisp(gray: np.ndarray):
     """Produce a thick, high-contrast binary for skinny printed collector digits."""
     if gray is None or getattr(gray, "size", 0) == 0:
@@ -2150,34 +2287,35 @@ def _iter_set_hint_rois(roi_bgr):
     """Yield progressively tighter crops where the printed set code usually lives."""
     if roi_bgr is None or getattr(roi_bgr, "size", 0) == 0:
         return
-    yield roi_bgr
     try:
         h, w = roi_bgr.shape[:2]
         if h <= 0 or w <= 0:
             return
-        # Bottom-left quadrant: covers set code + collector number label
-        y0 = int(0.55 * h)
-        x1 = int(0.55 * w)
-        if (x1 - 0) > 6 and (h - y0) > 6:
-            yield roi_bgr[y0:h, 0:x1]
         # Tight region around the actual three-letter code (left of card number)
         y1 = h
         y0b = max(0, int(0.68 * h))
         x0b = max(0, int(0.02 * w))
-        x1b = min(w, int(0.42 * w))
+        x1b = min(w, int(0.46 * w))
         if (x1b - x0b) > 6 and (y1 - y0b) > 6:
             yield roi_bgr[y0b:y1, x0b:x1b]
-        # Whole bottom strip (helps when entire left edge is cropped)
-        strip_y0 = max(0, int(0.72 * h))
-        if (h - strip_y0) > 6:
-            yield roi_bgr[strip_y0:h, 0:w]
         # Left half of lower third — catches cases where only part of the band is visible
         lower_y0 = max(0, int(0.63 * h))
         lower_x1 = max(6, int(0.5 * w))
         if (h - lower_y0) > 6:
             yield roi_bgr[lower_y0:h, 0:lower_x1]
+        # Bottom-left quadrant: covers set code + collector number label
+        y0 = int(0.55 * h)
+        x1 = int(0.55 * w)
+        if (x1 - 0) > 6 and (h - y0) > 6:
+            yield roi_bgr[y0:h, 0:x1]
+        # Whole bottom strip (helps when entire left edge is cropped)
+        strip_y0 = max(0, int(0.72 * h))
+        if (h - strip_y0) > 6:
+            yield roi_bgr[strip_y0:h, 0:w]
+        # Fallback: full provided ROI last (tends to include rules text)
+        yield roi_bgr
     except Exception:
-        pass
+        yield roi_bgr
 
 def _ai_band_roi(card_bgr):
     """Deprecated helper kept for compatibility; no longer used."""
@@ -2198,7 +2336,6 @@ def _ai_set_code_roi(card_bgr):
     """Return the exact AI 'set_name' ROI for set-code OCR (no padding)."""
     if not _ai_enabled() or card_bgr is None or getattr(card_bgr, "size", 0) == 0:
         return None
-<<<<<<< ours
     # Try relaxed first so we still get a box when YOLO confidence is low.
     roi = _ai_crop_asym_relaxed(
         card_bgr,
@@ -2228,24 +2365,31 @@ def _ai_set_code_roi(card_bgr):
                 _dbg("OCR SET ROI", "missing set_name box; falling back later")
         except Exception:
             pass
-=======
-    roi = _ai_crop_exact(card_bgr, "set_name")
-    if roi is None or getattr(roi, "size", 0) == 0:
-        return None
->>>>>>> theirs
     return roi
 
 def _iter_number_rois(card_bgr):
     """Yield candidate ROIs that may contain the collector number."""
     if card_bgr is None or getattr(card_bgr, "size", 0) == 0:
         return
-    yielded = 0
     try:
         max_rois_cfg = int(globals().get("OCR_NUM_MAX_ROIS", 4))
     except Exception:
         max_rois_cfg = 4
-    max_rois = 1 if _AI_ROI_STRICT else max(6, max_rois_cfg)
+    max_rois = 1 if _AI_ROI_STRICT else min(max(2, max_rois_cfg), 6)
     card_roi = _card_crop_or_full(card_bgr)
+    rois = []
+    _seen = set()
+
+    def _add(label, roi):
+        if roi is None or getattr(roi, "size", 0) == 0:
+            return
+        if len(rois) >= max_rois:
+            return
+        if label in _seen:
+            return
+        _seen.add(label)
+        rois.append((label, roi))
+
     if _ai_enabled():
         try:
             if DEBUG_OCR and _AI_NUM_LOGS["count"] < 3:
@@ -2255,96 +2399,51 @@ def _iter_number_rois(card_bgr):
                 _AI_NUM_LOGS["count"] += 1
         except Exception:
             pass
+        # Prioritize the most focused AI-guided regions first.
+        for label, ai_roi in _ai_card_number_rois(card_bgr):
+            _add(label, ai_roi)
+            if len(rois) >= max_rois:
+                break
         ai_card = _ai_crop_relaxed(card_bgr, "card", pad_x=_AI_CARD_PAD_RIGHT, pad_y=_AI_CARD_PAD_Y)
         if ai_card is not None and getattr(ai_card, "size", 0) > 0:
             try:
-                # Tight bottom-right slice where collector numbers live.
-                br = _slice_frac(ai_card, 0.70, 0.99, 0.58, 0.99)
-                if br is not None and getattr(br, "size", 0) > 0:
-                    yielded += 1
-                    yield ("ai-card-bottom-right", br)
-                    if yielded >= max_rois:
-                        return
-                # Wider bottom band from AI card crop.
-                ai_band = _slice_frac(ai_card, 0.68, 1.0)
-                if ai_band is not None and getattr(ai_band, "size", 0) > 0:
-                    yielded += 1
-                    yield ("ai-card-band", ai_band)
-                    if yielded >= max_rois:
-                        return
-                    try:
-                        h, w = ai_band.shape[:2]
-                        right = ai_band[:, int(0.55 * w):]
-                        if right is not None and getattr(right, "size", 0) > 0:
-                            yielded += 1
-                            yield ("ai-card-band-right", right)
-                            if yielded >= max_rois:
-                                return
-                        tight = ai_band[:, int(0.70 * w):]
-                        if tight is not None and getattr(tight, "size", 0) > 0:
-                            yielded += 1
-                            yield ("ai-card-band-tight", tight)
-                            if yielded >= max_rois:
-                                return
-                    except Exception:
-                        pass
+                tight = _slice_frac(ai_card, 0.72, 0.99, 0.65, 0.99)
             except Exception:
-                pass
-        # Last resort AI regions: raw card box and set-name band.
-        for label, ai_roi in _ai_card_number_rois(card_bgr):
-            if ai_roi is None or getattr(ai_roi, "size", 0) == 0:
-                continue
-            yielded += 1
-            yield (label, ai_roi)
-            if yielded >= max_rois:
-                return
+                tight = None
+            _add("ai-card-tight", tight)
+            br = _slice_frac(ai_card, 0.70, 0.99, 0.58, 0.99)
+            _add("ai-card-bottom-right", br)
+            ai_band = _slice_frac(ai_card, 0.68, 1.0)
+            if ai_band is not None and getattr(ai_band, "size", 0) > 0:
+                try:
+                    h, w = ai_band.shape[:2]
+                    right = ai_band[:, int(0.70 * w):]
+                except Exception:
+                    right = None
+                _add("ai-card-band-tight", right if right is not None else ai_band)
+                _add("ai-card-band", ai_band)
         roi = _ai_crop(card_bgr, "set_name", pad_x=_AI_CARD_PAD_RIGHT, pad_y=_AI_CARD_PAD_Y)
-        if roi is not None and getattr(roi, "size", 0) > 0:
-            yielded += 1
-            yield ("ai-set-name", roi)
-            if yielded >= max_rois:
-                return
-    if _AI_ROI_STRICT:
-        return
-    if card_roi is not None and getattr(card_roi, "size", 0) > 0:
-        band_roi = _slice_frac(card_roi, 0.68, 1.0)
-        if band_roi is not None and getattr(band_roi, "size", 0) > 0:
-            try:
-                # Focused right-side slice where digits usually live
-                h, w = band_roi.shape[:2]
-                right = band_roi[:, int(0.55 * w):]
-                if right is not None and getattr(right, "size", 0) > 0:
-                    yielded += 1
-                    yield ("band-right", right)
-                    if yielded >= max_rois:
-                        return
-                tight = band_roi[:, int(0.72 * w):]
-                if tight is not None and getattr(tight, "size", 0) > 0:
-                    yielded += 1
-                    yield ("band-tight", tight)
-                    if yielded >= max_rois:
-                        return
-            except Exception:
-                pass
-            yielded += 1
-            yield ("card-band", band_roi)
-            if yielded >= max_rois:
-                return
-            # Use the same sub-ROI strategy as set-code OCR to focus on the printed band
-            idx = 0
-            for sub in _iter_set_hint_rois(band_roi):
-                if sub is None or getattr(sub, "size", 0) == 0:
-                    continue
-                yielded += 1
-                yield (f"band-sub-{idx}", sub)
-                idx += 1
-                if yielded >= max_rois:
-                    return
-    if yielded == 0:
+        _add("ai-set-name", roi)
+    if not _AI_ROI_STRICT and len(rois) < max_rois:
+        if card_roi is not None and getattr(card_roi, "size", 0) > 0:
+            band_roi = _slice_frac(card_roi, 0.68, 1.0)
+            if band_roi is not None and getattr(band_roi, "size", 0) > 0:
+                try:
+                    h, w = band_roi.shape[:2]
+                    right = band_roi[:, int(0.55 * w):]
+                    tight = band_roi[:, int(0.72 * w):]
+                except Exception:
+                    right = tight = None
+                _add("band-right", right)
+                _add("band-tight", tight)
+                _add("card-band", band_roi)
+    if not rois:
         # last resort: full card crop
         _dbg("OCR NUM", "No number ROIs detected; using full card fallback")
         fallback = card_roi if card_roi is not None else card_bgr
-        yield ("fallback-card", fallback)
+        _add("fallback-card", fallback)
+    for label, roi in rois[:max_rois]:
+        yield (label, roi)
 
 _SET_CODE_LOOKALIKES = str.maketrans({
     "0": "o",
@@ -2353,6 +2452,7 @@ _SET_CODE_LOOKALIKES = str.maketrans({
     "8": "b",
     "|": "l",
     "§": "s",
+    "!": "i",
 })
 
 def _normalize_set_code_token(tok: str) -> str:
@@ -2374,12 +2474,30 @@ def _closest_set_code(tok: str) -> str:
         codes = list(SCRYFALL_SET_CODES or [])
         if not codes:
             return ""
-        # 1-char substitution (helps D↔O/0 typos) for 3-letter codes
         if len(norm) == 3:
+            # Prefer codes with the most positional matches (helps ONE->WOE ties)
+            def _pos_score(code):
+                if len(code) != 3:
+                    return -1
+                return sum(1 for a, b in zip(code, norm) if a == b)
+            best_code = ""
+            best_score = -1
+            for code in codes:
+                if len(code) != 3:
+                    continue
+                sc = _pos_score(code)
+                if sc > best_score:
+                    best_score = sc
+                    best_code = code
+            if best_score > 0 and best_code:
+                return best_code
+            # 1-char substitution (helps D↔O/0 typos) for 3-letter codes
             confusable = {
                 "o": ("o", "0", "d"),
                 "0": ("0", "o", "d"),
                 "d": ("d", "o", "0"),
+                "v": ("v", "w"),
+                "w": ("w", "vv"),
             }
             for i, ch in enumerate(norm):
                 repls = confusable.get(ch, (ch,))
@@ -3061,12 +3179,18 @@ def _read_collector_number(img, foil: bool = False):
     start_ts = time.perf_counter()
     budget_s = max(0.5, float(globals().get("OCR_NUM_BUDGET_S", 2.0)))
     hard_cap = float(globals().get("OCR_NUM_HARD_CAP_S", 5.0))
+    soft_cap = float(globals().get("OCR_NUM_SOFT_CAP_S", 8.0))
     num_timing_debug = bool(globals().get("OCR_NUM_TIMING_DEBUG", True))
+    early_exit_conf = max(_FAST_NUM_CONF_EXIT, float(globals().get("OCR_NUM_EARLY_EXIT_CONF", 64.0)))
     roi_times = [] if num_timing_debug else None
     if hard_cap > 0:
         if budget_s > hard_cap:
             _dbg("OCR NUM", f"Clamping number OCR budget to {hard_cap:.1f}s (was {budget_s:.1f}s)")
         budget_s = min(budget_s, hard_cap)
+    elif soft_cap > 0:
+        if budget_s > soft_cap:
+            _dbg("OCR NUM", f"Clamping number OCR budget to {soft_cap:.1f}s (soft cap)")
+        budget_s = min(budget_s, soft_cap)
     deadline = start_ts + budget_s
 
     def _time_left():
@@ -3097,7 +3221,7 @@ def _read_collector_number(img, foil: bool = False):
         if roi_bgr is None or getattr(roi_bgr, "size", 0) == 0:
             return False
         t0 = time.perf_counter()
-        roi_deadline = min(deadline, t0 + 0.90)  # per-ROI cap to avoid burning all time on one band
+        roi_deadline = min(deadline, t0 + 0.60)  # per-ROI cap to avoid burning all time on one band
         def _roi_time_left():
             return time.perf_counter() < roi_deadline and _time_left()
         if not _roi_time_left():
@@ -3125,16 +3249,12 @@ def _read_collector_number(img, foil: bool = False):
                 return False
             if not _roi_time_left():
                 return False
-            g = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
+            g = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
             g = cv2.GaussianBlur(g, (3, 3), 0)
             if not _roi_time_left():
                 return False
             bin_img_inv = cv2.adaptiveThreshold(
                 g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
-                17 if foil else 23, 3
-            )
-            bin_img = cv2.adaptiveThreshold(
-                g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
                 17 if foil else 23, 3
             )
             changed = False
@@ -3161,44 +3281,35 @@ def _read_collector_number(img, foil: bool = False):
                 return False
 
             if use_tess and _roi_time_left():
-                _paddle_num(src, stage_hint="paddle")
-            if use_tess and _roi_time_left() and crisp_bgr is not None:
-                _paddle_num(crisp_bgr, allow_bonus=1.2, maxw_val=520, stage_hint="paddle-crisp")
-            if use_tess and _roi_time_left():
                 try:
                     bin_bgr = cv2.cvtColor(bin_img_inv, cv2.COLOR_GRAY2BGR)
                 except Exception:
                     bin_bgr = None
-                _paddle_num(bin_bgr, allow_bonus=0.0, maxw_val=380, stage_hint="paddle-bin")
-            if use_tess and _roi_time_left():
-                try:
-                    _, otsu_inv = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                    otsu_bgr = cv2.cvtColor(otsu_inv, cv2.COLOR_GRAY2BGR)
-                except Exception:
-                    otsu_bgr = None
-                _paddle_num(otsu_bgr, allow_bonus=0.0, maxw_val=380, stage_hint="paddle-otsu")
-            if use_tess and _roi_time_left():
-                try:
-                    bin_pos = cv2.cvtColor(bin_img, cv2.COLOR_GRAY2BGR)
-                except Exception:
-                    bin_pos = None
-                _paddle_num(bin_pos, allow_bonus=0.5, maxw_val=420, stage_hint="paddle-bin-pos")
-            if use_tess and _roi_time_left():
-                try:
-                    _, otsu_pos = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    otsu_pos_bgr = cv2.cvtColor(otsu_pos, cv2.COLOR_GRAY2BGR)
-                except Exception:
-                    otsu_pos_bgr = None
-                _paddle_num(otsu_pos_bgr, allow_bonus=0.5, maxw_val=420, stage_hint="paddle-otsu-pos")
-            if use_tess and _roi_time_left():
                 try:
                     bh = _blackhat_bin(gray)
                     bh_bgr = cv2.cvtColor(bh, cv2.COLOR_GRAY2BGR)
                 except Exception:
                     bh_bgr = None
-                _paddle_num(bh_bgr, allow_bonus=1.0, maxw_val=420, stage_hint="paddle-blackhat")
-            if (not changed) and use_tess and _roi_time_left():
-                _paddle_num(src, stage_hint="paddle-repeat")
+                passes = [
+                    ("paddle", src, 0.0, 360),
+                    ("paddle-crisp", crisp_bgr, 1.0, 440),
+                    ("paddle-bin", bin_bgr, 0.4, 360),
+                ]
+                if bh_bgr is not None and getattr(bh_bgr, "size", 0) > 0:
+                    passes.append(("paddle-blackhat", bh_bgr, 0.9, 360))
+                for stage_hint, img_bgr, bonus_extra, maxw_val in passes:
+                    if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+                        continue
+                    if not _roi_time_left():
+                        break
+                    hit = _paddle_num(img_bgr, allow_bonus=bonus_extra, maxw_val=maxw_val, stage_hint=stage_hint)
+                    strong = best_tok and str(best_tok).isdigit() and best_conf >= _FAST_NUM_CONF_EXIT
+                    if hit and (strong or best_conf >= max(_FAST_NUM_CONF_EXIT, 65.0)):
+                        break
+                    if strong:
+                        break
+                    if best_tok and best_conf >= early_exit_conf:
+                        break
             if roi_times is not None:
                 try:
                     roi_times.append((label or "roi", time.perf_counter() - t0, changed, str(best_tok), float(best_conf)))
@@ -3222,13 +3333,10 @@ def _read_collector_number(img, foil: bool = False):
             break
         bonus = 4.0 if label.startswith("ai-") else 2.0 if "band" in label else 0.5
         _scan_roi(roi, label=label, bonus=bonus)
-        if best_tok and best_conf >= max(_FAST_NUM_CONF_EXIT, 72.0):
+        if best_tok and label.startswith("ai-") and best_conf >= _FAST_NUM_CONF_EXIT:
             break
-        if best_tok and label.startswith("ai-"):
-            # Early exit on confident AI-guided hit
-            break
-        if best_tok and best_conf >= max(_FAST_NUM_CONF_EXIT, 70.0):
-            # Good enough: stop burning time on extra rois
+        if best_tok and best_conf >= early_exit_conf:
+            # Good enough: stop burning time on extra ROIs once we have a stable hit
             break
     if not _time_left() and not best_tok:
         _dbg("OCR NUM", f"Number OCR budget hit after {budget_s:.1f}s")
@@ -3946,12 +4054,13 @@ def _orig_ocr_from_card_upright(img):
 
     foil = False
     foil_score = 0.0
-    if FOIL_DETECT:
+    detect_foil_now = bool(FOIL_DETECT and getattr(_OCR_CONTEXT, "from_snapshot", False))
+    if detect_foil_now:
         try:
             foil, foil_score = _detect_foil_card(img)
+            _dbg("FOIL DETECTION", f"status={foil} score={foil_score:.2f}")
         except Exception:
             foil, foil_score = False, 0.0
-    _dbg("FOIL DETECTION", f"status={foil} score={foil_score:.2f}")
 
     top_bin = _prep_roi_for_ocr(roi_top)
     alt_bin = _prep_roi_for_ocr(roi_alt)
@@ -4483,7 +4592,7 @@ def _scryfall_request(url, params=None, tries=2, timeout=None):
         time.sleep(0.15)
     return None
 
-def _scry_fix_mismatch(choice, name, number_raw, set_hint):
+def _scry_fix_mismatch(choice, name, number_raw, set_hint, name_conf=None):
     """
     If we have a set hint and/or collector number and the chosen print
     doesn't match, try to fetch the correct printing explicitly.
@@ -4492,6 +4601,12 @@ def _scry_fix_mismatch(choice, name, number_raw, set_hint):
     try:
         nm_orig = (name or "").strip()
         set_hint = (set_hint or "").lower()
+        try:
+            nm_conf = float(name_conf or 0.0)
+        except Exception:
+            nm_conf = 0.0
+        nm_key = _norm_key(nm_orig)
+        strong_name = bool(nm_key and nm_conf >= 80.0)
 
         # normalize collector number like the lookup does (strip leading zeros)
         import re as _re
@@ -4502,6 +4617,41 @@ def _scry_fix_mismatch(choice, name, number_raw, set_hint):
             return m.group(1) if m else ""
 
         cn_norm = _normalize_cn_for_search(number_raw)
+
+        def _name_matches(card):
+            """Loose check to ensure we don't swap to a totally different card name."""
+            if not nm_key:
+                return True
+            try:
+                card_nm = _norm_key((card or {}).get("name") or "")
+                if card_nm == nm_key:
+                    return True
+                for face in (card or {}).get("card_faces") or []:
+                    if _norm_key(face.get("name") or "") == nm_key:
+                        return True
+                combined = DFC_FACE_TO_COMBINED_NORM.get(nm_key)
+                if combined and card_nm == _norm_key(combined):
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _pick(card, mode):
+            """Return a new candidate only if it aligns with the OCR name (when present)."""
+            if card is None:
+                return None
+            try:
+                card["_match_mode"] = mode
+            except Exception:
+                pass
+            if nm_key and not _name_matches(card):
+                # If we already have a choice that matches the name, keep it.
+                if choice and _name_matches(choice):
+                    return choice
+                # When the OCR name is confident, don't replace it with an unrelated card.
+                if strong_name:
+                    return None
+            return card
 
         # If nothing to enforce, or the current choice already matches, keep it.
         if not set_hint and not cn_norm:
@@ -4525,10 +4675,9 @@ def _scry_fix_mismatch(choice, name, number_raw, set_hint):
                 "unique": "prints", "order": "released", "dir": "desc"
             })
             if data and data.get("data"):
-                card = data["data"][0]
-                try: card["_match_mode"] = "postfix_enforce_name_set_cn"
-                except Exception: pass
-                return card
+                card = _pick(data["data"][0], "postfix_enforce_name_set_cn")
+                if card is not None:
+                    return card
 
         # Strategy 2: set + cn (no name)
         if set_hint and cn_norm:
@@ -4537,10 +4686,9 @@ def _scry_fix_mismatch(choice, name, number_raw, set_hint):
                 "unique": "prints", "order": "released", "dir": "desc"
             })
             if data and data.get("data"):
-                card = data["data"][0]
-                try: card["_match_mode"] = "postfix_enforce_set_cn"
-                except Exception: pass
-                return card
+                card = _pick(data["data"][0], "postfix_enforce_set_cn")
+                if card is not None:
+                    return card
 
         # Strategy 3: name + set (ignore cn)
         if nm_orig and set_hint:
@@ -4549,10 +4697,9 @@ def _scry_fix_mismatch(choice, name, number_raw, set_hint):
                 "unique": "prints", "order": "released", "dir": "desc"
             })
             if data and data.get("data"):
-                card = data["data"][0]
-                try: card["_match_mode"] = "postfix_enforce_name_set"
-                except Exception: pass
-                return card
+                card = _pick(data["data"][0], "postfix_enforce_name_set")
+                if card is not None:
+                    return card
 
         return choice
     except Exception:
@@ -5502,7 +5649,16 @@ def video_thread():
         _dbg("CAMERA ERROR", f"Could not open camera {CAMERA_DEVICE}")
         return
     _dbg("CAMERA INFO", f"{int(cap.get(3))}x{int(cap.get(4))} @ {cap.get(5):.1f}fps")
-    scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0, 'steady': False, 'steady_relaxed': False, 'steady_promoted': False})
+    scanner_state.update({
+        'locked': False,
+        'locked_frames': 0,
+        'locked_area': 0,
+        'steady': False,
+        'steady_relaxed': False,
+        'steady_promoted': False,
+        'steady_blur': 0.0,
+        'steady_motion': 0.0,
+    })
     frame_i = 0
 
     try:
@@ -5580,8 +5736,16 @@ def detect_worker():
                 except Exception:
                     pass
                 with video_lock:
-                    scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0.0,
-                                          'steady': False, 'steady_relaxed': False, 'steady_promoted': False})
+                    scanner_state.update({
+                        'locked': False,
+                        'locked_frames': 0,
+                        'locked_area': 0.0,
+                        'steady': False,
+                        'steady_relaxed': False,
+                        'steady_promoted': False,
+                        'steady_blur': 0.0,
+                        'steady_motion': 0.0,
+                    })
                     current_card_crop = None
                     current_card_quad = None
                 manual_locked_frames = 0
@@ -5596,6 +5760,7 @@ def detect_worker():
             continue
         frame = _frame_q[-1]
         _last_detect_ts = time.time()
+        steady_ok, steady_blur, steady_motion = _update_steady_state_from_frame(frame)
 
         # Manual crop path: bypass detection entirely and use saved quad
         if manual_crop_enabled:
@@ -5603,17 +5768,6 @@ def detect_worker():
                 tracks.clear()
             manual_q = _manual_quad_px(frame.shape) if frame is not None else None
             manual_crop = warp_card(frame, manual_q) if manual_q is not None else None
-            foil_now = scanner_state.get("foil")
-            foil_score = scanner_state.get("foil_score")
-            if FOIL_DETECT and manual_crop is not None and (frame_i % max(1, int(FOIL_EVERY_N_FRAMES)) == 0):
-                try:
-                    isf, score = _detect_foil_card(manual_crop)
-                    prev = float(scanner_state.get("foil_score", 0.0))
-                    sm = 0.7 * prev + 0.3 * score if prev else score
-                    foil_now = (sm >= FOIL_ON_TH) or (bool(scanner_state.get("foil", False)) and sm >= FOIL_OFF_TH)
-                    foil_score = round(sm, 2)
-                except Exception:
-                    pass
             # Update ROI detector so OCR uses the correct regions even in manual mode
             if _ai_enabled() and manual_crop is not None and not bool(globals().get("AI_ROIS_SNAPSHOT_ONLY", False)):
                 try:
@@ -5631,11 +5785,11 @@ def detect_worker():
                     'locked': manual_q is not None,
                     'locked_frames': manual_locked_frames if manual_q is not None else 0,
                     'locked_area': _quad_area(manual_q) if manual_q is not None else 0.0,
-                    'steady': bool(manual_q is not None),
+                    'steady': bool(steady_ok),
                     'steady_relaxed': False,
                     'steady_promoted': False,
-                    'foil': foil_now,
-                    'foil_score': foil_score
+                    'steady_blur': float(round(steady_blur, 2)),
+                    'steady_motion': float(round(steady_motion, 4)),
                 })
             frame_i += 1
             continue
@@ -5777,14 +5931,16 @@ def detect_worker():
                     if first_seen_ts > 0.0 and (time.time() - first_seen_ts) >= promote_window:
                         promote_ready = True
                 steady = (base_steady and (bool(tracker_steady) or relax_ready)) or promote_ready
-                relaxed_flag = bool((relax_ready or promote_ready) and not tracker_steady)
+                relaxed_flag = bool((relax_ready or promote_ready) and not tracker_steady and steady_ok)
                 scanner_state.update({
                     'locked': True,
                     'locked_frames': locked_frames,
                     'locked_area': locked.get('area', 0.0),
-                    'steady': steady,
+                    'steady': bool(steady_ok and steady),
                     'steady_relaxed': relaxed_flag,
-                    'steady_promoted': bool(promote_ready and not tracker_steady)
+                    'steady_promoted': bool(promote_ready and not tracker_steady and steady_ok),
+                    'steady_blur': float(round(steady_blur, 2)),
+                    'steady_motion': float(round(steady_motion, 4)),
                 })
 
             # Update YOLOv5 ROI detector (throttled)
@@ -5795,20 +5951,6 @@ def detect_worker():
                         _update_ai_rois(ai_crop)
             except Exception:
                 pass
-            # optional foil detection (throttled)
-            if FOIL_DETECT and (frame_i % max(1, int(FOIL_EVERY_N_FRAMES)) == 0) and crop is not None:
-                try:
-                    isf, score = _detect_foil_card(crop)
-                    prev = float(scanner_state.get("foil_score", 0.0))
-                    sm = 0.7 * prev + 0.3 * score if prev else score
-                    was = bool(scanner_state.get("foil", False))
-                    nowf = (sm >= FOIL_ON_TH) or (was and sm >= FOIL_OFF_TH)
-                    scanner_state.update({"foil": nowf, "foil_score": round(sm, 2)})
-                except Exception:
-                    pass
-            elif not FOIL_DETECT:
-                scanner_state.pop("foil", None)
-                scanner_state.pop("foil_score", None)
         else:
             try:
                 card_tracker.update(None)
@@ -5817,7 +5959,16 @@ def detect_worker():
             with video_lock:
                 current_card_crop = None
                 current_card_quad = None
-                scanner_state.update({'locked': False, 'locked_frames': 0, 'locked_area': 0.0, 'steady': False, 'steady_relaxed': False, 'steady_promoted': False})
+                scanner_state.update({
+                    'locked': False,
+                    'locked_frames': 0,
+                    'locked_area': 0.0,
+                    'steady': bool(steady_ok),
+                    'steady_relaxed': False,
+                    'steady_promoted': False,
+                    'steady_blur': float(round(steady_blur, 2)),
+                    'steady_motion': float(round(steady_motion, 4)),
+                })
 
         frame_i += 1
 def ocr_worker():
@@ -5876,10 +6027,15 @@ def ocr_worker():
                 if res["name"] != res["name_raw"]:
                     _dbg("OCR INFO", f"'{res['name_raw']}' -> '{res['name']}'")
                 _dbg("OCR INFO", f"name='{res['name']}'(c:{res['name_conf']:.1f}) num='{res['number']}' raw='{res.get('number_raw','')}'(c:{res['number_conf']:.1f}) set='{res.get('set_hint','')}' foil={res.get('foil')} ({res.get('foil_score',0):.2f})")
+            res_ts = time.time()
+            res_with_ts = dict(res)
+            res_with_ts["updated_at"] = res_ts
             with ocr_lock:
                 ocr_state.update(res)
-                ocr_state["updated_at"] = time.time()
+                ocr_state["updated_at"] = res_ts
                 ocr_state["seq"] = local_seq
+            if is_snapshot:
+                _refresh_timed_out_entry(local_seq, snap, res_with_ts)
         except Exception as e:
             with ocr_lock:
                 ocr_state["last_error"] = str(e)
@@ -6057,6 +6213,7 @@ def cardinfo_worker():
             set_hint   = (ocr_state.get("set_hint") or "").strip().lower()
             updated_at = ocr_state.get("updated_at", 0)
             seq        = ocr_state.get("seq")
+            name_conf  = float(ocr_state.get("name_conf") or 0.0)
 
         # Only work once per OCR update; require at least name or number
         if not (name or number_raw) or updated_at == cardinfo_state.get("last_updated", 0):
@@ -6115,7 +6272,7 @@ def cardinfo_worker():
                 choice = None
 
         try:
-            choice = _scry_fix_mismatch(choice, name, number_raw, set_hint)
+            choice = _scry_fix_mismatch(choice, name, number_raw, set_hint, name_conf=name_conf)
         except Exception:
             pass
 
@@ -6354,8 +6511,8 @@ def autoscan_manager():
         job_for_cycle = int(job or 0)
         _scan_perf_start = time.time()
 
-        # 2) Small grace period to let the stream settle, then capture (manual crop if available)
-        _dbg("AUTOSCAN", f"ready -> capture after grace delay (job={job})")
+        # 2) Small grace period, then require steady hold before capture
+        _dbg("AUTOSCAN", f"ready -> waiting for steady hold (job={job})")
         settle_deadline = time.time() + AUTO_CAPTURE_WAIT_S
         still_pending = pending
         while not shutdown_evt.is_set() and time.time() < settle_deadline:
@@ -6365,7 +6522,36 @@ def autoscan_manager():
                 break
             time.sleep(0.02)
         if not still_pending:
-            _dbg("AUTOSCAN", f"aborting capture; pending={still_pending} (job={job})",)
+            _dbg("AUTOSCAN", f"aborting capture; pending={still_pending} (job={job})")
+            continue
+
+        steady_hold = max(0.0, float(AUTO_CAPTURE_STEADY_HOLD_S))
+        steady_timeout = max(steady_hold, float(AUTO_CAPTURE_STEADY_TIMEOUT_S or 0.0))
+        steady_ready = (steady_hold <= 0.0 and steady_timeout <= 0.0)
+        if not steady_ready:
+            steady_start = None
+            hold_deadline = time.time() + steady_timeout if steady_timeout > 0 else None
+            while not shutdown_evt.is_set():
+                with printer_lock:
+                    still_pending = bool(printer_state.get("awaiting", False))
+                if not still_pending:
+                    _dbg("AUTOSCAN", f"aborting capture; pending={still_pending} (job={job})")
+                    break
+                with video_lock:
+                    steady_now = bool(scanner_state.get("steady", False))
+                if steady_now:
+                    steady_start = steady_start or time.time()
+                    if steady_hold <= 0.0 or (time.time() - steady_start) >= steady_hold:
+                        steady_ready = True
+                        break
+                else:
+                    steady_start = None
+                if hold_deadline and time.time() >= hold_deadline:
+                    _dbg("AUTOSCAN", f"steady hold timeout after {steady_timeout:.2f}s; capturing anyway (job={job})")
+                    steady_ready = True
+                    break
+                time.sleep(0.02)
+        if not still_pending or not steady_ready:
             continue
 
         # 3) Capture a snapshot (using manual crop when available)
@@ -6380,7 +6566,7 @@ def autoscan_manager():
 
         # 4) Wait briefly for OCR results tied to THIS snapshot seq
         deadline = time.time() + AUTOSCAN_OCR_TIMEOUT
-        nm = ""; cn_raw = ""; shint = ""; ocr_updated_at = 0.0
+        nm = ""; cn_raw = ""; shint = ""; ocr_updated_at = 0.0; nm_conf = 0.0
         got_ocr = False
         wait_start = time.time()
         t_ocr_ready = wait_start
@@ -6391,6 +6577,7 @@ def autoscan_manager():
                 cn_raw  = (ocr_state.get("number_raw") or "").strip()
                 shint   = (ocr_state.get("set_hint") or "").strip().lower()
                 ocr_updated_at = float(ocr_state.get("updated_at", 0))
+                nm_conf = float(ocr_state.get("name_conf") or 0.0)
                 got_ocr = seq_ok and bool(nm or cn_raw)
             if got_ocr:
                 t_ocr_ready = time.time()
@@ -6446,7 +6633,7 @@ def autoscan_manager():
             except Exception:
                 choice = None
         try:
-            choice = _scry_fix_mismatch(choice, nm, cn_raw, shint)
+            choice = _scry_fix_mismatch(choice, nm, cn_raw, shint, name_conf=nm_conf)
         except Exception:
             pass
         # Publish cardinfo immediately so the UI shows data without waiting for the worker
@@ -6534,7 +6721,7 @@ def autoscan_manager():
 
         # 10) Persist review entry & resume processing/stream
         try:
-            save_scan_entry(
+            entry = save_scan_entry(
                 snap_img if snap_img is not None else np.zeros((10,10,3), np.uint8),
                 ocr_snapshot,
                 choice,
@@ -6542,7 +6729,12 @@ def autoscan_manager():
                 match_score,
                 match_ok,
                 review_decision=decision,
+                seq=cur_seq,
+                job=job_for_cycle,
+                timed_out=not got_ocr,
+                late_update=False,
             )
+            _register_seq_entry(cur_seq, entry.get("id"), timed_out=not got_ocr)
 
             # Resume processing for this snapshot
             global PROC_PAUSED, PROC_PAUSE_SEQ
@@ -6587,6 +6779,125 @@ def autoscan_manager():
                 printer_state["last_decision"] = "SCAN_FAIL"
 
         # 12) (moved) Cleanup happens on ACK; do not clear awaiting here.
+
+# Late OCR reconciliation: update a timed-out entry when results arrive afterward.
+def _refresh_timed_out_entry(seq, snap_img, ocr_res):
+    if seq is None or snap_img is None or not ocr_res:
+        return
+    entry = _entry_for_seq(seq)
+    if not entry or not bool(entry.get("timed_out")):
+        return
+
+    nm = (ocr_res.get("name") or ocr_res.get("name_raw") or "").strip()
+    cn_raw = (ocr_res.get("number_raw") or ocr_res.get("number") or "").strip()
+    shint = (ocr_res.get("set_hint") or "").strip().lower()
+    nm_conf = float(ocr_res.get("name_conf") or 0.0)
+
+    choice = None
+    with cardinfo_lock:
+        if cardinfo_state.get("last_updated") == ocr_res.get("updated_at"):
+            choice = cardinfo_state.get("scry")
+    if choice is None and (nm or cn_raw):
+        try:
+            choice = _scryfall_lookup_once(nm, cn_raw, shint, seq)
+            if choice is None and shint:
+                choice = _scryfall_lookup_once(nm, cn_raw, "", seq)
+        except Exception:
+            choice = None
+    try:
+        choice = _scry_fix_mismatch(choice, nm, cn_raw, shint, name_conf=nm_conf)
+    except Exception:
+        pass
+
+    scry_img = _fetch_scry_image(choice) if choice is not None else None
+    match_score, match_ok, cmp_details, cmp_jpg = 0.0, False, None, None
+    if scry_img is not None:
+        try:
+            match_score, match_ok = compare_snapshot_to_scryfall(
+                snap_img, scry_img, return_details=False, scry_card=choice
+            )
+            _, _, cmp_details = compare_snapshot_to_scryfall(
+                snap_img, scry_img, return_details=True, scry_card=choice
+            )
+            if cmp_details:
+                _publish_compare_visual(cmp_details)
+                vis = _render_compare_visual(cmp_details)
+                cmp_jpg = _jpeg_bytes(vis, JPEG_QUALITY_CMP) if vis is not None else None
+        except Exception:
+            pass
+
+    decision = _derive_review_outcome(
+        ocr_res,
+        choice,
+        match_score,
+        match_ok,
+        snapshot_ok=True,
+        scry_img_ok=bool(scry_img),
+        match_mode=(choice or {}).get("_match_mode"),
+        allow_auto_name_fix=True,
+    )
+    reasons = list(decision.get("review_reasons") or [])
+    reasons.append("Late OCR result after timeout")
+    # force review + flag
+    decision["status"] = "review"
+    decision["flagged"] = True
+    decision["review_reasons"] = list(dict.fromkeys(reasons))
+
+    def _fallback_name(ocr_obj, scry_obj):
+        nm = (ocr_obj or {}).get("name") or (ocr_obj or {}).get("name_raw") or ""
+        if nm:
+            return nm
+        nm = (scry_obj or {}).get("name") or ""
+        if nm:
+            return nm
+        set_hint = ((ocr_obj or {}).get("set_hint") or (scry_obj or {}).get("set") or "").strip()
+        num_disp = _parse_collector_for_display((ocr_obj or {}).get("number_raw") or (ocr_obj or {}).get("number") or "")
+        if set_hint and num_disp:
+            return f"{set_hint.upper()} #{num_disp}"
+        if set_hint:
+            return set_hint.upper()
+        if num_disp:
+            return f"#{num_disp}"
+        return "Unknown card"
+
+    updated_entry = {
+        "name": _fallback_name(ocr_res, choice),
+        "name_conf": float(ocr_res.get("name_conf", entry.get("name_conf", 0.0))),
+        "number": ocr_res.get("number") or "",
+        "number_raw": ocr_res.get("number_raw") or "",
+        "set_hint": ocr_res.get("set_hint") or "",
+        "foil": bool(ocr_res.get("foil", entry.get("foil", False))),
+        "scry": choice,
+        "cmp_stats": _cmp_stats_sanitized(cmp_details),
+        "cmp_jpg": cmp_jpg if cmp_jpg is not None else entry.get("cmp_jpg"),
+        "match_score": round(float(match_score), 3),
+        "match_ok": bool(match_ok) if match_ok is not None else None,
+        "flagged": True,
+        "status": "review",
+        "review_reasons": decision["review_reasons"],
+        "auto_name_fix": bool(decision.get("auto_name_fix")),
+        "review_level": decision.get("review_level", "info"),
+        "scry_match_mode": (choice or {}).get("_match_mode", entry.get("scry_match_mode", "none")),
+        "timed_out": False,
+        "late_update": True,
+    }
+
+    # Keep existing snapshots; only add if missing
+    if "snap_jpg" not in entry or not entry.get("snap_jpg"):
+        updated_entry["snap_jpg"] = _jpeg_bytes(snap_img, JPEG_QUALITY_SNAP)
+    if "thumb" not in entry or not entry.get("thumb"):
+        updated_entry["thumb"] = _make_thumb(snap_img, 120)
+
+    with history_lock:
+        if not bool(entry.get("timed_out")):
+            return
+        entry.update(updated_entry)
+        _persist_entry_to_disk(entry)
+    try:
+        _dbg("AUTOSCAN", f"Late OCR resolved seq={seq} -> flagged review ({updated_entry.get('name','')})")
+    except Exception:
+        pass
+    _mark_seq_resolved(seq)
 
 # =========================
 #MARK: STREAM / UI
@@ -6737,27 +7048,33 @@ def api_logs():
     except Exception:
         limit = 200
     limit = max(1, min(limit, 1000))
+    cur_level = _current_debug_level()
 
     with log_lock:
-        items = [e for e in LOG_RING if e["id"] > after][-limit:]
+        filtered = []
+        for e in LOG_RING:
+            if e["id"] <= after:
+                continue
+            try:
+                lvl_i = _normalize_level(e.get("tag"), e.get("msg"), e.get("lvl", DBG_INFO))
+            except Exception:
+                lvl_i = DBG_INFO
+            sev = e.get("sev") or _infer_severity(e.get("tag"), e.get("msg"), lvl_i)
+            # Match terminal behavior: success always visible; otherwise honor DEBUG_LEVEL threshold.
+            if sev == "ok" or lvl_i <= cur_level:
+                filtered.append({**e, "lvl": lvl_i, "sev": sev})
+        items = filtered[-limit:]
         nxt = LOG_SEQ
 
     out = []
     for e in items:
-        sev = e.get("sev")
-        if not sev:
-            try:
-                lvl_i = int(e.get("lvl", 1))
-            except Exception:
-                lvl_i = 1
-            sev = {0:"ok", 1:"info", 2:"info", 3:"warn", 4:"err"}.get(lvl_i, "info")
         out.append({
             "id":   int(e["id"]),
             "ts":   float(e["ts"]),
             "tag":  e["tag"],
             "msg":  e["msg"],
-            "lvl":  int(e.get("lvl", 1)),
-            "sev":  sev,
+            "lvl":  int(e.get("lvl", DBG_INFO)),
+            "sev":  e.get("sev", "info"),
             "line": f"[{e['tag']}] {e['msg']}",
         })
     return jsonify({"ok": True, "items": out, "next": int(nxt)})
@@ -6808,6 +7125,8 @@ def api_state():
         "locked_frames": 0,
         "locked_area": 0.0,
         "steady": False,
+        "steady_blur": 0.0,
+        "steady_motion": 0.0,
         "foil": False,
         "foil_score": 0.0,
         "provider": PRIMARY_PROVIDER_LABEL,
@@ -6907,6 +7226,8 @@ def _post_job_cleanup(job=None):
                 printer_state['job_id'] = None
         with video_lock:
             scanner_state['steady'] = False
+            scanner_state['steady_blur'] = 0.0
+            scanner_state['steady_motion'] = 0.0
         STREAM_STATE['paused'] = False
         STREAM_STATE['paused_reason'] = None
         try:
@@ -7571,6 +7892,7 @@ def api_scan_edit(sid):
         target["number"] = _parse_collector_for_display(number_raw)
     if set_hint:
         target["set_hint"] = set_hint
+    name_conf = float(target.get("name_conf") or 0.0)
     choice = None
     if scry_id:
         choice = _scryfall_request(f"https://api.scryfall.com/cards/{scry_id}") or None
@@ -7584,7 +7906,8 @@ def api_scan_edit(sid):
             choice,
             target.get("name",""),
             target.get("number_raw",""),
-            set_hint or target.get("set_hint","")
+            set_hint or target.get("set_hint",""),
+            name_conf=name_conf,
         )
     if choice:
         target["scry"] = choice
@@ -8475,7 +8798,6 @@ def _read_set_hint(roi_bgr: np.ndarray) -> str:
             if not raw:
                 return
             txt = (raw or "").upper()
-            # First, prefer 3-letter all-cap tokens (better D/O disambiguation)
             tokens = re.findall(r"[A-Z]{3}", txt) + re.findall(r"[A-Z0-9]{2,5}", txt)
             for tok in tokens:
                 norm = _normalize_set_code_token(tok)
@@ -8490,6 +8812,25 @@ def _read_set_hint(roi_bgr: np.ndarray) -> str:
         for sub in _iter_set_hint_rois(roi_bgr):
             if sub is None or getattr(sub, "size", 0) == 0:
                 continue
+
+            sc_bin, sc_inv = _prep_set_code_roi(sub)
+            for sc_img in (sc_bin, sc_inv):
+                if sc_img is None or getattr(sc_img, "size", 0) == 0:
+                    continue
+                try:
+                    sc_bgr = cv2.cvtColor(sc_img, cv2.COLOR_GRAY2BGR)
+                except Exception:
+                    sc_bgr = None
+                if sc_bgr is not None:
+                    t_sc, conf_sc = _tess_text_from_bgr(
+                        sc_bgr,
+                        allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                        det=False,
+                        maxw=420,
+                    )
+                    direct = _add_candidates(t_sc, 1.35 + max(0.0, float(conf_sc)) * 0.01)
+                    if direct:
+                        return direct
 
             # Binary (general OCR)
             bin_img = _prep_roi_for_ocr(sub)
@@ -9143,7 +9484,8 @@ def _fast_ocr_from_card_upright(img):
     foil = False
     foil_score = 0.0
     try:
-        if globals().get("FOIL_DETECT", True):
+        detect_foil_now = bool(globals().get("FOIL_DETECT", True) and getattr(_OCR_CONTEXT, "from_snapshot", False))
+        if detect_foil_now:
             foil, foil_score = _detect_foil_card(img)
     except Exception:
         foil = False
@@ -9154,6 +9496,7 @@ def _fast_ocr_from_card_upright(img):
     name_perf = [] if bool(globals().get("PERF_TIMING_DEBUG", True)) else None
     _t_name = time.perf_counter()
     try:
+        name_budget = max(1.0, float(globals().get("OCR_NAME_BUDGET_S", 3.0)))
         name_rois = []
         # Primary: AI name box
         if _ai_enabled():
@@ -9183,9 +9526,10 @@ def _fast_ocr_from_card_upright(img):
                 name_rois.append(("alt", r_alt))
 
         best_txt, best_conf = "", 0.0
-        maxw_val = max(900, int(globals().get("OCR_TITLE_MAX_W", 640)))
+        maxw_val = max(320, int(globals().get("OCR_TITLE_MAX_W", 640)))
         early_exit = bool(globals().get("OCR_TITLE_EARLY_EXIT", True))
         early_conf = float(globals().get("OCR_TITLE_EARLY_CONF", 88.0))
+        budget_hit = False
 
         def _iter_name_variants(roi):
             """Yield a few enhanced versions of the ROI to improve Paddle recognition."""
@@ -9194,7 +9538,7 @@ def _fast_ocr_from_card_upright(img):
             yield "raw", roi
             try:
                 g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if getattr(roi, "ndim", 0) == 3 else roi
-                g = cv2.resize(g, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+                g = cv2.resize(g, None, fx=2.4, fy=2.4, interpolation=cv2.INTER_CUBIC)
                 g = cv2.GaussianBlur(g, (3, 3), 0)
                 th = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 23, 9)
                 th_inv = 255 - th
@@ -9242,7 +9586,10 @@ def _fast_ocr_from_card_upright(img):
                     break
             if best_conf >= early_conf and early_exit:
                 break
-        if (not best_txt) and (not _AI_ROI_STRICT):
+            if best_txt and (time.perf_counter() - _t_name) >= name_budget:
+                budget_hit = True
+                break
+        if (not best_txt) and (not _AI_ROI_STRICT) and (not budget_hit):
             try:
                 fallback_rois = []
                 try:
@@ -9273,9 +9620,14 @@ def _fast_ocr_from_card_upright(img):
                             best_txt, best_conf = _maybe_correct_ocr_name(txt, conf), conf
                         if best_conf >= early_conf and early_exit:
                             break
+                        if best_txt and (time.perf_counter() - _t_name) >= name_budget:
+                            budget_hit = True
+                            break
                     if best_conf >= early_conf and early_exit:
                         break
-                if (not best_txt):
+                    if budget_hit:
+                        break
+                if (not best_txt) and (not budget_hit):
                     salvage_txt, salvage_conf = _paddle_salvage_title(img, foil=foil)
                     salvage_txt = _clean_title_text(salvage_txt)
                     if salvage_txt:
@@ -9309,48 +9661,9 @@ def _fast_ocr_from_card_upright(img):
     _t_num = time.perf_counter()
     if not skip_number:
         try:
-            rois = []
-            if _ai_enabled():
-                ai_card = _ai_crop_relaxed(img, "card", pad_x=_AI_CARD_PAD_RIGHT, pad_y=_AI_CARD_PAD_Y)
-                if ai_card is not None and getattr(ai_card, "size", 0) > 0:
-                    try:
-                        br = _slice_frac(ai_card, 0.70, 0.99, 0.58, 0.99)
-                        if br is not None and getattr(br, "size", 0) > 0:
-                            rois.append(("ai-card-bottom-right", br))
-                        band = _slice_frac(ai_card, 0.68, 1.0)
-                        if band is not None and getattr(band, "size", 0) > 0:
-                            rois.append(("ai-card-band", band))
-                            try:
-                                h, w = band.shape[:2]
-                                right = band[:, int(0.55 * w):]
-                                if right is not None and getattr(right, "size", 0) > 0:
-                                    rois.append(("ai-card-band-right", right))
-                                tight = band[:, int(0.72 * w):]
-                                if tight is not None and getattr(tight, "size", 0) > 0:
-                                    rois.append(("ai-card-band-tight", tight))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                rois.extend(list(_ai_card_number_rois(img)))
-                for lbl, roi in rois:
-                    _save_roi_debug(lbl, roi)
-            if (not rois) and (not _AI_ROI_STRICT):
-                card_roi = _card_crop_or_full(img)
-                if card_roi is not None and getattr(card_roi, "size", 0) > 0:
-                    band_roi = _slice_frac(card_roi, 0.68, 1.0)
-                    if band_roi is not None and getattr(band_roi, "size", 0) > 0:
-                        rois.append(("card-band", band_roi))
-                        try:
-                            h, w = band_roi.shape[:2]
-                            right = band_roi[:, int(0.55 * w):]
-                            if right is not None and getattr(right, "size", 0) > 0:
-                                rois.append(("card-band-right", right))
-                            tight = band_roi[:, int(0.72 * w):]
-                            if tight is not None and getattr(tight, "size", 0) > 0:
-                                rois.append(("card-band-tight", tight))
-                        except Exception:
-                            pass
+            rois = list(_iter_number_rois(img))
+            for lbl, roi in rois:
+                _save_roi_debug(lbl, roi)
             try:
                 number_deadline = time.perf_counter() + max(0.35, float(globals().get("OCR_NUM_FAST_CAP_S", 3.5)))
             except Exception:
@@ -9362,7 +9675,8 @@ def _fast_ocr_from_card_upright(img):
                 tok, conf = _fast_read_number(roi, source_tag=label, deadline=number_deadline)
                 if conf > number_conf:
                     number_tok, number_conf = tok, conf
-                if number_tok and str(number_tok).isdigit() and number_conf >= max(_FAST_NUM_CONF_EXIT, 72.0):
+                strong_exit = float(globals().get("OCR_NUM_STRONG_EXIT_CONF", max(_FAST_NUM_CONF_EXIT, 64.0)))
+                if number_tok and str(number_tok).isdigit() and number_conf >= strong_exit:
                     break
 
             if not number_tok:
@@ -9393,6 +9707,10 @@ def _fast_ocr_from_card_upright(img):
 
     # track set_hint even if we fall back later
     set_hint = ""
+    set_hint_roi = ""
+    set_hint_band = ""
+    set_hint_name = ""
+    set_hint_from_band = False
 
     # --- Fallback to slower OCR if we still have nothing meaningful ---
     try:
@@ -9420,64 +9738,152 @@ def _fast_ocr_from_card_upright(img):
     # --- Set hint from AI set_name / bottom band (tight ROI) ---
     _t_set = time.perf_counter()
     try:
+        set_budget = max(1.0, float(globals().get("SET_OCR_BUDGET_S", 4.0)))
+
+        def _set_time_left():
+            return (time.perf_counter() - _t_set) < set_budget
+
         roi = _ai_set_code_roi(img) if _ai_enabled() else None
         if (roi is None or getattr(roi, "size", 0) == 0) and _ai_enabled():
             # Fallback: raw AI 'set_name' box if band ROI is unavailable.
             roi = _ai_crop_exact(img, "set_name")
-        if roi is not None and getattr(roi, "size", 0) > 0:
+        if roi is not None and getattr(roi, "size", 0) > 0 and _set_time_left():
             _save_roi_debug("ai-set", roi)
             roi_for_ocr = _pad_roi_for_ocr(roi, pad_px=4)
+            best_code = ""
+            set_votes = {}
+
+            def _add_set_vote(raw_txt, weight=1.0):
+                nonlocal set_votes
+                if not raw_txt:
+                    return
+                toks = re.findall(r"[A-Za-z0-9]{2,5}", (raw_txt or "").upper())
+                for tok in toks:
+                    norm = _normalize_set_code_token(tok)
+                    if not norm:
+                        continue
+                    prev = set_votes.get(norm, 0.0)
+                    set_votes[norm] = max(prev, float(weight))
             try:
                 if DEBUG_OCR:
                     _dbg("OCR SET ROI", f"shape={getattr(roi_for_ocr,'shape',None)} tess_backend={_use_tesseract_backend()}")
             except Exception:
                 pass
-            txt_raw, conf_raw = _tess_text_from_bgr(
-                roi_for_ocr,
-                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            )
-            txt_raw = (txt_raw or "").strip().upper()
-            if txt_raw:
+            sc_bin, sc_inv = _prep_set_code_roi(roi_for_ocr)
+            for img, w in (
+                (sc_bin, 1.35),
+                (sc_inv, 1.30),
+            ):
+                if img is None or getattr(img, "size", 0) == 0 or (not _set_time_left()):
+                    continue
                 try:
-                    code = _normalize_set_code_token(txt_raw)
-                    if code and code not in SCRYFALL_SET_CODES:
-                        code = _closest_set_code(code) or code
+                    bgr_img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                 except Exception:
-                    code = txt_raw
-                if code and 2 <= len(code) <= 5:
-                    set_hint = code.lower()
-                    if DEBUG_OCR and _AI_SET_LOGS["count"] < 4:
-                        _AI_SET_LOGS["count"] += 1
-                        try:
-                            _dbg(
-                                "OCR SET ROI",
-                                f"set_hint='{set_hint}' raw='{txt_raw}' shape={roi.shape[1]}x{roi.shape[0]}",
-                            )
-                        except Exception:
-                            pass
+                    bgr_img = None
+                if bgr_img is None:
+                    continue
+                txt_raw, conf_raw = _tess_text_from_bgr(
+                    bgr_img,
+                    allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                    maxw=420,
+                )
+                _add_set_vote(txt_raw, w + max(0.0, float(conf_raw)) * 0.01)
+
+            try:
+                bin_for_ocr = _prep_roi_for_ocr(roi_for_ocr)
+                bin_bgr = cv2.cvtColor(bin_for_ocr, cv2.COLOR_GRAY2BGR)
+            except Exception:
+                bin_bgr = roi_for_ocr
+            for img in (bin_bgr, roi_for_ocr):
+                if not _set_time_left():
+                    break
+                txt_raw, conf_raw = _tess_text_from_bgr(
+                    img,
+                    allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                )
+                _add_set_vote(txt_raw, 1.15 + max(0.0, float(conf_raw)) * 0.01)
+
+            best_code = ""
+            if set_votes:
+                def _vote_score(code, weight):
+                    in_set = code in SCRYFALL_SET_CODES
+                    length_bias = 0.35 if len(code) == 3 else 0.0
+                    letter_bias = 0.15 if code.isalpha() else 0.0
+                    return weight + length_bias + letter_bias + (0.65 if in_set else 0.0)
+                best_code, _ = max(set_votes.items(), key=lambda kv: _vote_score(kv[0], kv[1]))
+            if not best_code:
+                best_code = _fast_read_set_hint(roi_for_ocr) or ""
+            if best_code:
+                norm_best = _normalize_set_code_token(best_code)
+                if norm_best and norm_best not in SCRYFALL_SET_CODES:
+                    norm_best = _closest_set_code(norm_best) or norm_best
+                best_code = norm_best
+            if best_code and 2 <= len(best_code) <= 5:
+                set_hint_roi = best_code.lower()
+                if DEBUG_OCR and _AI_SET_LOGS["count"] < 4:
+                    _AI_SET_LOGS["count"] += 1
+                    try:
+                        _dbg(
+                            "OCR SET ROI",
+                            f"set_hint='{set_hint_roi}' votes={set_votes} shape={roi.shape[1]}x{roi.shape[0]}",
+                        )
+                    except Exception:
+                        pass
     except Exception:
         pass
-    if not set_hint:
-        try:
-            card_roi = _card_crop_or_full(img)
-            band = _slice_frac(card_roi, 0.68, 1.0) if card_roi is not None else None
-            set_hint = (_read_set_hint(band) or "").strip().lower() if band is not None else ""
-        except Exception:
-            pass
-    if not set_hint:
+    try:
+        card_roi = _card_crop_or_full(img)
+        band = _slice_frac(card_roi, 0.68, 1.0) if card_roi is not None else None
+        if _set_time_left() and band is not None and not set_hint_roi:
+            set_hint_band = (_read_set_hint(band) or "").strip().lower()
+        else:
+            set_hint_band = ""
+    except Exception:
+        pass
+    if (not set_hint_roi) and (not set_hint_band) and _set_time_left():
         try:
             set_name_txt = _read_set_name_roi(img)
-            set_hint = (_set_code_from_set_name(set_name_txt) or "").strip().lower()
+            set_hint_name = (_set_code_from_set_name(set_name_txt) or "").strip().lower()
         except Exception:
             pass
+    # Merge: prefer localized AI ROI, then printed set name, then band OCR
+    if set_hint_roi:
+        set_hint = set_hint_roi
+    elif set_hint_name:
+        set_hint = set_hint_name
+    elif set_hint_band:
+        set_hint = set_hint_band
+        set_hint_from_band = True
+    # If band and ROI disagree, lean toward the localized ROI but log it.
+    if set_hint_band and set_hint_roi and set_hint_band != set_hint_roi:
+        try:
+            _dbg("OCR SET ROI", f"band_hint='{set_hint_band}' overridden by roi='{set_hint_roi}'")
+        except Exception:
+            pass
+        set_hint = set_hint_roi or set_hint
     set_dt = time.perf_counter() - _t_set
 
     # Final consolidation: resolve set hint using all fallbacks (band, name, icon) if still weak
     try:
-        if (not set_hint) or (set_hint and set_hint not in SCRYFALL_SET_CODES):
-            resolved = _resolve_set_hint(img, initial_hint=set_hint, name_hint=name_txt)
+        resolved = None
+        if _set_time_left() and ((not set_hint) or (set_hint and (set_hint not in SCRYFALL_SET_CODES or set_hint_from_band))):
+            remaining = max(0.5, set_budget - (time.perf_counter() - _t_set))
+            orig_icon_budget = globals().get("ICON_MATCH_BUDGET_S", None)
+            try:
+                globals()["ICON_MATCH_BUDGET_S"] = min(float(orig_icon_budget if orig_icon_budget is not None else 3.0), remaining)
+            except Exception:
+                pass
+            try:
+                resolved = _resolve_set_hint(img, initial_hint=set_hint, name_hint=name_txt)
+            finally:
+                try:
+                    if orig_icon_budget is not None:
+                        globals()["ICON_MATCH_BUDGET_S"] = orig_icon_budget
+                except Exception:
+                    pass
             if resolved:
                 set_hint = resolved
+                set_hint_from_band = False
     except Exception:
         pass
 

@@ -52,9 +52,15 @@ MAX_ASSOC_DIST = _get("MAX_ASSOC_DIST", 80, int)
 MAX_CARDS      = _get("MAX_CARDS", 1, int)
 STEADY_MIN_FRAMES    = _get("STEADY_MIN_FRAMES", 8, int)
 AUTO_CAPTURE_WAIT_S  = _get("AUTO_CAPTURE_WAIT_S", 0.18, float)
-AUTOSCAN_OCR_TIMEOUT = _get("AUTOSCAN_OCR_TIMEOUT", 20.0, float)
+AUTO_CAPTURE_STEADY_HOLD_S = _get("AUTO_CAPTURE_STEADY_HOLD_S", 1.5, float)
+AUTO_CAPTURE_STEADY_TIMEOUT_S = _get("AUTO_CAPTURE_STEADY_TIMEOUT_S", 6.0, float)
+AUTOSCAN_OCR_TIMEOUT = _get("AUTOSCAN_OCR_TIMEOUT", 30.0, float)
 STEADY_RELAX_FRAMES  = _get("STEADY_RELAX_FRAMES", 4, int)
 STEADY_PROMOTE_S     = _get("STEADY_PROMOTE_S", 0.9, float)
+STEADY_DOWNSCALE_W   = _get("STEADY_DOWNSCALE_W", 320, int)
+STEADY_EMA_ALPHA     = _get("STEADY_EMA_ALPHA", 0.18, float)
+STEADY_BLUR_VAR_MIN  = _get("STEADY_BLUR_VAR_MIN", 45.0, float)
+STEADY_MOTION_MAX    = _get("STEADY_MOTION_MAX", 3.4, float)
 DETECT_EVERY_N_FRAMES = _get("DETECT_EVERY_N_FRAMES", 1, int)
 RECTANGULARITY_MIN    = _get("RECTANGULARITY_MIN", 0.76, float)
 CARD_DETECT_MIN_SCORE = _get("CARD_DETECT_MIN_SCORE", 0.42, float)
@@ -95,15 +101,21 @@ TEXT_PRESENCE_MIN = _get("TEXT_PRESENCE_MIN", 0.020, float)
 TITLE_ALLOW_TESS_FALLBACK = _get("TITLE_ALLOW_TESS_FALLBACK", 0, bool)
 CARD_STREAM_LIVE = _get("CARD_STREAM_LIVE", True, bool)
 LIVE_CROP_WHILE_PAUSED = _get("LIVE_CROP_WHILE_PAUSED", True, bool)
-OCR_NUM_BUDGET_S = _get("OCR_NUM_BUDGET_S", 20.0, float)  # cap slow number OCR passes
+OCR_NUM_BUDGET_S = _get("OCR_NUM_BUDGET_S", 12.0, float)  # cap slow number OCR passes
 OCR_NUM_HARD_CAP_S = _get("OCR_NUM_HARD_CAP_S", 0.0, float)  # absolute ceiling for number OCR (0 = no clamp)
-OCR_NUM_FAST_CAP_S = _get("OCR_NUM_FAST_CAP_S", 3.5, float)  # max time spent in fast number loop
+OCR_NUM_FAST_CAP_S = _get("OCR_NUM_FAST_CAP_S", 2.0, float)  # max time spent in fast number loop
 OCR_NUM_ALLOW_SLOW = _get("OCR_NUM_ALLOW_SLOW", True, bool)  # allow slow number OCR fallback
-OCR_NUM_MAX_ROIS = _get("OCR_NUM_MAX_ROIS", 8, int)  # limit number ROI attempts (keeps EasyOCR passes bounded)
+OCR_NUM_MAX_ROIS = _get("OCR_NUM_MAX_ROIS", 4, int)  # limit number ROI attempts (keeps EasyOCR passes bounded)
 OCR_SKIP_NUMBER = _get("OCR_SKIP_NUMBER", False, bool)  # rely on Scryfall number; skip card-number OCR
 OCR_NUM_TIMING_DEBUG = _get("OCR_NUM_TIMING_DEBUG", True, bool)  # extra timing logs for number OCR
 OCR_NUM_MAX_ROI_W = _get("OCR_NUM_MAX_ROI_W", 960, int)  # clamp width of number ROIs to keep OCR fast
 OCR_NUM_PREFIX_STRIP = _get("OCR_NUM_PREFIX_STRIP", True, bool)  # strip leading zeros before scoring digits
+OCR_NUM_SOFT_CAP_S = _get("OCR_NUM_SOFT_CAP_S", 5.0, float)  # clamp slow number OCR even when hard cap is disabled
+OCR_NUM_EARLY_EXIT_CONF = _get("OCR_NUM_EARLY_EXIT_CONF", 64.0, float)  # accept number OCR earlier when confidence is good
+OCR_NUM_STRONG_EXIT_CONF = _get("OCR_NUM_STRONG_EXIT_CONF", 62.0, float)  # confidence to break out of fast ROI loop
+PERF_TIMING_DEBUG = _get("PERF_TIMING_DEBUG", False, bool)
+OCR_NAME_BUDGET_S = _get("OCR_NAME_BUDGET_S", 3.0, float)  # cap time spent on title OCR variants
+SET_OCR_BUDGET_S = _get("SET_OCR_BUDGET_S", 4.0, float)  # cap time spent on set-hint/icon matching
 
 # =========================
 # OCR FAST-PATH TOGGLES (easy to remove)
@@ -138,6 +150,10 @@ ALWAYS_SCAN_OK = _get("ALWAYS_SCAN_OK", 1, bool)
 MATCH_USE_ART  = _get("MATCH_USE_ART", 1, bool)
 MATCH_REQUIRE_ORB = _get("MATCH_REQUIRE_ORB", 1, bool)
 MATCH_ORB_FAIL_THRESHOLD = _get("MATCH_ORB_FAIL_THRESHOLD", 0.0, float)
+AI_SET_PAD_LEFT = _get("AI_SET_PAD_LEFT", 0.0, float)
+AI_SET_PAD_RIGHT = _get("AI_SET_PAD_RIGHT", 0.0, float)
+AI_SET_PAD_TOP = _get("AI_SET_PAD_TOP", 0.0, float)
+AI_SET_PAD_BOTTOM = _get("AI_SET_PAD_BOTTOM", 0.0, float)
 
 # =========================
 # SCRYFALL / PRICES
@@ -172,7 +188,8 @@ REMEASURE_EVERY   = _get("REMEASURE_EVERY", 5, int)  # cards per re-probe (0 = d
 # =========================
 # DEBUG
 # =========================
-DEBUG_LEVEL    = _get("DEBUG_LEVEL", 1, int)
+# 1=errors, 2=warnings, 3=info (default), 4=debug/noisy
+DEBUG_LEVEL    = _get("DEBUG_LEVEL", 4, int)
 
 # =========================
 # PERSISTENCE (Review history)

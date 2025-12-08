@@ -18,14 +18,16 @@
   const liveImg   = document.getElementById("live");
   const cardImg   = document.getElementById("card");
   const cmpImg    = document.getElementById("cmpimg");
-
-  // ROI overlay controls
-  const roiBox  = document.getElementById("roiOverlay");
-  const roiReset= document.getElementById("roiReset");
-  const roiRead = document.getElementById("roiReadout");
+  const manualSvg = document.getElementById("manualCropSvg");
+  const manualPoly = document.getElementById("manualCropPoly");
+  const manualHandles = Array.from(document.querySelectorAll(".manual-handle"));
+  const manualSaved = document.getElementById("manualSaved");
+  const btnManualReset = document.getElementById("btnManualReset");
 
   // modal
   const btnEdit   = document.getElementById("btnEdit");
+  const btnReprocess = document.getElementById("btnReprocess");
+  const btnReprocessBatch = document.getElementById("btnReprocessBatch");
   const modal     = document.getElementById("editModal");
   const btnClose  = document.getElementById("editClose");
   const eiName    = document.getElementById("eiName");
@@ -34,6 +36,35 @@
   const eiSearch  = document.getElementById("eiSearch");
   const eiApply   = document.getElementById("eiApply");
   const eiResults = document.getElementById("eiResults");
+  const reModal      = document.getElementById("reprocessModal");
+  const reprocessClose = document.getElementById("reprocessClose");
+  const reprocessApply = document.getElementById("reprocessApply");
+  const reprocessReject= document.getElementById("reprocessReject");
+  const reprocessStatus= document.getElementById("reprocessStatus");
+  const reprocessContent = document.getElementById("reprocessContent");
+  const reprocessProgressBar = document.getElementById("reprocessProgressBar");
+  const reOldName    = document.getElementById("reOldName");
+  const reOldSet     = document.getElementById("reOldSet");
+  const reOldNumber  = document.getElementById("reOldNumber");
+  const reOldScore   = document.getElementById("reOldScore");
+  const reOldFlag    = document.getElementById("reOldFlag");
+  const reOldCmp     = document.getElementById("reOldCmp");
+  const reOldReasons = document.getElementById("reOldReasons");
+  const reNewName    = document.getElementById("reNewName");
+  const reNewSet     = document.getElementById("reNewSet");
+  const reNewNumber  = document.getElementById("reNewNumber");
+  const reNewScore   = document.getElementById("reNewScore");
+  const reNewFlag    = document.getElementById("reNewFlag");
+  const reNewCmp     = document.getElementById("reNewCmp");
+  const reNewReasons = document.getElementById("reNewReasons");
+  const reNewScry    = document.getElementById("reNewScry");
+  const batchModal   = document.getElementById("reprocessBatchModal");
+  const batchClose   = document.getElementById("reprocessBatchClose");
+  const batchDone    = document.getElementById("reprocessBatchDone");
+  const batchStatus  = document.getElementById("reprocessBatchStatus");
+  const batchList    = document.getElementById("reprocessBatchList");
+  const batchOverallBar = document.getElementById("reprocessBatchOverallBar");
+  const batchCurrentBar = document.getElementById("reprocessBatchCurrentBar");
   const consoleBox   = document.getElementById("consoleBox");
   const btnLogPause  = document.getElementById("btnLogPause");
   const btnLogClear  = document.getElementById("btnLogClear");
@@ -49,6 +80,439 @@
 let historyModalQueryQS = "";  // modal-only filters
 let filterContext = 'list';
   let modalOpen = false;
+  let reprocessToken = null;
+  let reprocessTargetId = null;
+  let reprocessBatchItems = [];
+  let reprocessProgressStop = null;
+  let batchOverallProgressStop = null;
+  let batchCurrentProgressStop = null;
+  const SCAN_META_LIMIT = 2000;
+  const scanMetaCache = new Map();
+  let activeEditId = null;
+  const manualDefaultQuad = [[0.18, 0.10], [0.82, 0.10], [0.82, 0.92], [0.18, 0.92]];
+  let manualQuad = manualDefaultQuad.map(p => p.slice());
+  let manualEnabled = true;
+  let manualDragIdx = null;
+  let manualSaveTimer = null;
+  let lastCardinfoSeq = 0;
+  let lastCardinfoEtag = "";
+  let cardinfoPending = false;
+  let lastCmpSeq = 0;
+  // ------- Card magnifier (uses /card stream, not /live) -------
+  let lens = null;
+  let lensZoom = 2.0;
+  const LENS_MIN = 1.25;
+  const LENS_MAX = 6.0;
+  const LENS_SIZE = 200;
+  function getDisplayedBox(imgEl) {
+    if (!imgEl) return null;
+    const rect = imgEl.getBoundingClientRect();
+    const iw = Number(imgEl.naturalWidth || rect.width || 0);
+    const ih = Number(imgEl.naturalHeight || rect.height || 0);
+    if (!rect.width || !rect.height || !iw || !ih) return rect;
+    const imgRatio = iw / ih;
+    const boxRatio = rect.width / rect.height;
+    let w, h, offsetX, offsetY;
+    if (boxRatio > imgRatio) {
+      h = rect.height;
+      w = h * imgRatio;
+      offsetX = (rect.width - w) / 2;
+      offsetY = 0;
+    } else {
+      w = rect.width;
+      h = w / imgRatio;
+      offsetX = 0;
+      offsetY = (rect.height - h) / 2;
+    }
+    return {
+      left: rect.left + offsetX,
+      top: rect.top + offsetY,
+      width: w,
+      height: h,
+    };
+  }
+  function ensureLens() {
+    if (lens) return lens;
+    lens = document.createElement("div");
+    lens.id = "cardMagnifier";
+    Object.assign(lens.style, {
+      position: "fixed",
+      width: `${LENS_SIZE}px`,
+      height: `${LENS_SIZE}px`,
+      border: "2px solid #4a9cff",
+      borderRadius: "50%",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.35)",
+      overflow: "hidden",
+      pointerEvents: "none",
+      zIndex: 9999,
+      backgroundRepeat: "no-repeat",
+      backgroundSize: "cover",
+      display: "none",
+    });
+    document.body.appendChild(lens);
+    return lens;
+  }
+  function updateLensBackground(url) {
+    ensureLens();
+    lens.style.backgroundImage = `url('${url}')`;
+  }
+  function positionLens(e, imgRect) {
+    if (!lens || !imgRect) return;
+    const withinX = e.clientX >= imgRect.left && e.clientX <= imgRect.left + imgRect.width;
+    const withinY = e.clientY >= imgRect.top && e.clientY <= imgRect.top + imgRect.height;
+    if (!(withinX && withinY)) {
+      lens.style.display = "none";
+      return;
+    }
+    lens.style.display = "block";
+    const x = e.clientX;
+    const y = e.clientY;
+    lens.style.left = `${x - LENS_SIZE/2}px`;
+    lens.style.top  = `${y - LENS_SIZE/2}px`;
+    const relX = (e.clientX - imgRect.left) / imgRect.width;
+    const relY = (e.clientY - imgRect.top) / imgRect.height;
+    const bgX = -(relX * imgRect.width * lensZoom - LENS_SIZE/2);
+    const bgY = -(relY * imgRect.height * lensZoom - LENS_SIZE/2);
+    lens.style.backgroundSize = `${imgRect.width * lensZoom}px ${imgRect.height * lensZoom}px`;
+    lens.style.backgroundPosition = `${bgX}px ${bgY}px`;
+  }
+  function attachMagnifier(imgEl, defaultSrc) {
+    if (!imgEl) return;
+    let rect = null;
+    imgEl.addEventListener("mouseenter", () => {
+      rect = getDisplayedBox(imgEl);
+      const src = imgEl.getAttribute("src") || defaultSrc || "/card";
+      updateLensBackground(src);
+      ensureLens().style.display = "block";
+    });
+    imgEl.addEventListener("mousemove", (e) => {
+      if (!lens || !rect) return;
+      rect = getDisplayedBox(imgEl) || rect;
+      positionLens(e, rect);
+    });
+    imgEl.addEventListener("mouseleave", () => {
+      rect = null;
+      if (lens) lens.style.display = "none";
+    });
+    imgEl.addEventListener("wheel", (e) => {
+      if (!lens || lens.style.display === "none") return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.2 : 0.2;
+      lensZoom = Math.min(LENS_MAX, Math.max(LENS_MIN, lensZoom + delta));
+      if (!rect) rect = imgEl.getBoundingClientRect();
+      positionLens(e, rect);
+    }, { passive: false });
+  }
+
+  function rememberScanMeta(items) {
+    if (!Array.isArray(items)) return;
+    if (scanMetaCache.size > SCAN_META_LIMIT) {
+      scanMetaCache.clear();
+    }
+    items.forEach(it => {
+      if (!it || typeof it.id === "undefined") return;
+      const prev = scanMetaCache.get(it.id) || {};
+      scanMetaCache.set(it.id, Object.assign({}, prev, it));
+    });
+  }
+  function makeThumbPlaceholder() {
+    const div = document.createElement("div");
+    div.className = "thumb thumb-missing";
+    div.textContent = "No Image";
+    div.setAttribute("aria-label", "No snapshot available");
+    return div;
+  }
+  function attachThumbFallbacks(scope) {
+    if (!scope) return;
+    scope.querySelectorAll("img.thumb").forEach(img => {
+      img.addEventListener("error", () => {
+        const ph = makeThumbPlaceholder();
+        img.replaceWith(ph);
+      }, { once: true });
+    });
+  }
+  // Bind magnifier once the card image exists
+  attachMagnifier(cardImg, "/card");
+  attachMagnifier(cmpImg, "/compare.jpg");
+
+  // Card Info collapse
+  const ciPanel = document.getElementById("cardinfo-panel");
+  const ciToggle = document.getElementById("cardinfo-toggle");
+  const ciRestore = document.getElementById("cardinfo-restore");
+  ciToggle?.addEventListener("click", () => {
+    const collapsed = document.body.classList.toggle("ci-collapsed");
+    ciToggle.textContent = collapsed ? "Expand" : "Collapse";
+    ciToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    if (ciRestore) {
+      ciRestore.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+  });
+  ciRestore?.addEventListener("click", () => {
+    const nowCollapsed = document.body.classList.contains("ci-collapsed");
+    if (nowCollapsed) {
+      document.body.classList.remove("ci-collapsed");
+      ciToggle && (ciToggle.textContent = "Collapse", ciToggle.setAttribute("aria-expanded","true"));
+      ciRestore.setAttribute("aria-expanded", "true");
+    }
+  });
+
+  // ----- Manual crop overlay -----
+  function normalizeManualQuad(raw) {
+    if (!Array.isArray(raw) || raw.length !== 4) return manualDefaultQuad.map(p => p.slice());
+    return raw.map(pt => {
+      const x = Math.min(1, Math.max(0, Number(pt?.[0] ?? 0)));
+      const y = Math.min(1, Math.max(0, Number(pt?.[1] ?? 0)));
+      return [x, y];
+    });
+  }
+  function getLiveImageBox() {
+    if (!liveWrap) return null;
+    const rect = liveWrap.getBoundingClientRect();
+    const iw = Number(liveImg?.naturalWidth || rect.width || 0);
+    const ih = Number(liveImg?.naturalHeight || rect.height || 0);
+    if (!rect.width || !rect.height || !iw || !ih) return null;
+    const imgRatio = iw / ih;
+    const boxRatio = rect.width / rect.height;
+    let w, h, offsetX, offsetY;
+    if (boxRatio > imgRatio) {
+      h = rect.height;
+      w = h * imgRatio;
+      offsetX = (rect.width - w) / 2;
+      offsetY = 0;
+    } else {
+      w = rect.width;
+      h = w / imgRatio;
+      offsetX = 0;
+      offsetY = (rect.height - h) / 2;
+    }
+    // convert to page coords for pointer math
+    const left = rect.left + offsetX;
+    const top = rect.top + offsetY;
+    return { left, top, width: w, height: h, rect };
+  }
+  function drawManualQuad() {
+    if (!manualSvg || !manualPoly) return;
+    const box = getLiveImageBox();
+    if (!box) return;
+    const pts = manualQuad.map(p => {
+      const px = (((box.left - box.rect.left) + p[0] * box.width) / box.rect.width) * 100;
+      const py = (((box.top - box.rect.top) + p[1] * box.height) / box.rect.height) * 100;
+      return `${px.toFixed(2)},${py.toFixed(2)}`;
+    }).join(" ");
+    manualPoly.setAttribute("points", pts);
+    manualHandles.forEach((h, idx) => {
+      const p = manualQuad[idx] || [0, 0];
+      const px = (((box.left - box.rect.left) + p[0] * box.width) / box.rect.width) * 100;
+      const py = (((box.top - box.rect.top) + p[1] * box.height) / box.rect.height) * 100;
+      h.setAttribute("cx", px.toFixed(2));
+      h.setAttribute("cy", py.toFixed(2));
+    });
+  }
+  function setManualEnabled(on) {
+    manualEnabled = !!on;
+    if (manualSvg) manualSvg.style.display = manualEnabled ? "block" : "none";
+    const hint = document.querySelector(".manual-hint");
+    if (hint) hint.style.display = manualEnabled ? "flex" : "none";
+  }
+  function saveManualCrop(debounce = true) {
+    if (debounce) {
+      clearTimeout(manualSaveTimer);
+      manualSaveTimer = setTimeout(() => saveManualCrop(false), 200);
+      return;
+    }
+    if (!manualEnabled) {
+      setManualEnabled(true);
+    }
+    if (manualSaved) {
+      manualSaved.classList.remove("error");
+      manualSaved.textContent = "Saving…";
+    }
+    fetch("/api/manual_crop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quad: manualQuad, enabled: true })
+    }).then(r => r.json())
+      .then(() => {
+        if (manualSaved) manualSaved.textContent = "Saved";
+      })
+      .catch(() => {
+        if (manualSaved) {
+          manualSaved.textContent = "Save failed";
+          manualSaved.classList.add("error");
+        }
+      });
+  }
+  async function loadManualCrop() {
+    if (!manualSvg) return;
+    try {
+      const res = await fetch("/api/settings?ts=" + Date.now());
+      const data = await res.json();
+      manualQuad = normalizeManualQuad(data?.MANUAL_CROP_QUAD ?? manualDefaultQuad);
+      manualEnabled = data?.MANUAL_CROP_ENABLED !== false;
+    } catch (e) {
+      manualQuad = manualDefaultQuad.map(p => p.slice());
+      manualEnabled = true;
+    }
+    setManualEnabled(manualEnabled);
+    drawManualQuad();
+    if (manualSaved) manualSaved.textContent = "Saved";
+  }
+  if (manualSvg && manualHandles.length) {
+    manualHandles.forEach((h, idx) => {
+      h.addEventListener("pointerdown", (ev) => {
+        manualDragIdx = idx;
+        try { h.setPointerCapture(ev.pointerId); } catch (e) {}
+        ev.preventDefault();
+      });
+      h.addEventListener("pointermove", (ev) => {
+        if (manualDragIdx !== idx) return;
+        const box = getLiveImageBox();
+        if (!box) return;
+        const x = Math.min(1, Math.max(0, (ev.clientX - box.left) / box.width));
+        const y = Math.min(1, Math.max(0, (ev.clientY - box.top) / box.height));
+        manualQuad[idx] = [x, y];
+        drawManualQuad();
+        saveManualCrop(true);
+      });
+      ["pointerup", "pointercancel", "pointerleave"].forEach(evt => {
+        h.addEventListener(evt, () => {
+          if (manualDragIdx === idx) {
+            manualDragIdx = null;
+            saveManualCrop(false);
+          }
+        });
+      });
+    });
+  }
+  btnManualReset?.addEventListener("click", () => {
+    manualQuad = manualDefaultQuad.map(p => p.slice());
+    drawManualQuad();
+    saveManualCrop(false);
+  });
+  window.addEventListener("resize", drawManualQuad);
+  liveImg?.addEventListener("load", () => setTimeout(drawManualQuad, 60));
+
+  function esc(val) {
+    return String(val ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // ----- Console log helpers -----
+  function formatLogTime(ts) {
+    if (!ts && ts !== 0) return "";
+    try {
+      const d = new Date(ts * 1000);
+      return d.toLocaleTimeString("en-US", { hour12: false });
+    } catch {
+      return "";
+    }
+  }
+  function renderLogLine(item) {
+    const row = document.createElement("div");
+    row.className = "logline";
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = formatLogTime(item.ts || Date.now()/1000);
+    const tag = document.createElement("span");
+    const sev = (item.sev || "info").toLowerCase();
+    tag.className = `tag tag-${sev}`;
+    tag.textContent = item.tag || sev.toUpperCase();
+    const msg = document.createElement("span");
+    msg.className = "g";
+    msg.textContent = item.msg || item.line || "";
+    row.append(t, tag, msg);
+    return row;
+  }
+  function appendLogs(items) {
+    if (!consoleBox || !Array.isArray(items) || !items.length) return;
+    const atBottom = (consoleBox.scrollTop + consoleBox.clientHeight + 20) >= consoleBox.scrollHeight;
+    items.forEach(item => consoleBox.appendChild(renderLogLine(item)));
+    while (consoleBox.childNodes.length > 600) {
+      consoleBox.removeChild(consoleBox.firstChild);
+    }
+    if (atBottom) consoleBox.scrollTop = consoleBox.scrollHeight;
+  }
+  async function pollLogs() {
+    if (!consoleBox) return;
+    if (logPaused) { setTimeout(pollLogs, 1200); return; }
+    try {
+      const res = await fetch(`/api/logs?after=${logAfter}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.items)) {
+          appendLogs(data.items);
+          if (typeof data.next === "number") logAfter = data.next;
+        }
+      }
+    } catch (err) {
+      console.error("log poll failed", err);
+    }
+    setTimeout(pollLogs, 1200);
+  }
+  if (consoleBox) pollLogs();
+  btnLogPause?.addEventListener("click", () => {
+    logPaused = !logPaused;
+    btnLogPause.textContent = logPaused ? "Resume" : "Pause";
+    if (!logPaused) pollLogs();
+  });
+  btnLogClear?.addEventListener("click", async () => {
+    try { await fetch('/api/logs/clear', { method: 'POST' }); } catch {}
+    if (consoleBox) consoleBox.innerHTML = "";
+    logAfter = 0;
+  });
+
+  function openManualEditById(id) {
+    if (!id) return false;
+    const meta = scanMetaCache.get(id);
+    if (meta) {
+      openEditModal(Object.assign({ id }, meta));
+      return true;
+    }
+    return false;
+  }
+  function setProgressBar(el, fraction) {
+    if (!el) return;
+    const pct = Math.max(0, Math.min(1, Number(fraction || 0))) * 100;
+    el.style.width = pct.toFixed(1) + "%";
+  }
+  function startProgressRamp(el, max=0.9, step=0.01, speed=120) {
+    if (!el) return null;
+    let pct = 0.05;
+    setProgressBar(el, pct);
+    const timer = setInterval(() => {
+      pct = Math.min(max, pct + step + Math.random() * step * 0.5);
+      setProgressBar(el, pct);
+      if (pct >= max) clearInterval(timer);
+    }, speed);
+    return () => clearInterval(timer);
+  }
+  function stopIndeterminateBar(stopFn, el, fill=0) {
+    if (typeof stopFn === "function") {
+      try { stopFn(); } catch {}
+    }
+    if (el) setProgressBar(el, fill);
+    return null;
+  }
+  async function fetchWithFallback(urls, options) {
+    let lastErr;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, options);
+        if (!res.ok) {
+          lastErr = new Error(`HTTP ${res.status}`);
+          continue;
+        }
+        return await res.json();
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error("Request failed");
+  }
 
 function pill(cls, txt, title) {
   return '<span class="pill ' + cls + '"' +
@@ -67,165 +531,15 @@ function updatePills(el, pills) {
     catch { return cur + " " + String(val); }
   }
 
-  // ---------- ROI overlay ----------
-  // Compute the displayed portion of the <img> when object-fit:contain is used
-  function imageRectOnScreen() {
-    const wrap = liveWrap.getBoundingClientRect();
-    const iw = liveImg.naturalWidth || 1920, ih = liveImg.naturalHeight || 1080;
-    const arImg = iw / ih, arWrap = wrap.width / wrap.height;
-    let w,h,x,y;
-    if (arImg > arWrap) { w = wrap.width; h = w/arImg; x = wrap.left; y = wrap.top + (wrap.height-h)/2; }
-    else { h = wrap.height; w = h*arImg; y = wrap.top; x = wrap.left + (wrap.width-w)/2; }
-    return {left:x, top:y, width:w, height:h, right:x+w, bottom:y+h};
+  function refreshCompare(token) {
+    const cmp = document.getElementById("cmpimg");
+    if (!cmp) return;
+    const seq = (typeof token === "number" && !Number.isNaN(token)) ? token : Date.now();
+    lastCmpSeq = seq;
+    cmp.src = "/compare.jpg?seq=" + seq;
   }
-  function overlayToNorm() {
-    const IR = imageRectOnScreen();
-    const OR = roiBox.getBoundingClientRect();
-    const x0 = (OR.left   - IR.left) / IR.width;
-    const y0 = (OR.top    - IR.top ) / IR.height;
-    const x1 = (OR.right  - IR.left) / IR.width;
-    const y1 = (OR.bottom - IR.top ) / IR.height;
-    return [
-      Math.max(0,Math.min(1,x0)), Math.max(0,Math.min(1,y0)),
-      Math.max(0,Math.min(1,x1)), Math.max(0,Math.min(1,y1))
-    ];
-  }
-  function normToOverlay([x0,y0,x1,y1]) {
-    const IR = imageRectOnScreen();
-    const wrap = liveWrap.getBoundingClientRect();
-    const L = IR.left + IR.width  * x0 - wrap.left;
-    const T = IR.top  + IR.height * y0 - wrap.top;
-    const W = IR.width  * (x1-x0);
-    const H = IR.height * (y1-y0);
-    roiBox.style.left = L + "px";
-    roiBox.style.top  = T + "px";
-    roiBox.style.width  = W + "px";
-    roiBox.style.height = H + "px";
-  }
-  async function pushROIToServer() {
-    try {
-      const rr = overlayToNorm();
-      roiRead.textContent = `ROI ${rr.map(n=>Math.round(n*100)).join('% , ')}%`;
-      await fetch('/api/detect_roi', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ roi: rr })
-      });
-    } catch {}
-  }
-  async function initROI() {
-    try {
-      const r = await fetch('/api/detect_roi'); const d = await r.json();
-      const roi = (d && d.roi && d.roi.length===4) ? d.roi : [0,0,1,1];
-      normToOverlay(roi);
-      roiRead.textContent = `ROI ${roi.map(n=>Math.round(n*100)).join('% , ')}%`;
-    } catch {
-      normToOverlay([0,0,1,1]);
-      roiRead.textContent = 'ROI 0–100%';
-    }
-  }
-  // Drag/resize (mouse & touch)
-  let dragMode=null, start=null, startRect=null;
-  function startDrag(e){
-    e.preventDefault();
-    const t = e.target;
-    dragMode = (t.classList && t.classList.contains('h')) ? t.classList[1] : 'move';
-    const r = roiBox.getBoundingClientRect();
-    start = {x:(e.touches?e.touches[0].clientX:e.clientX), y:(e.touches?e.touches[0].clientY:e.clientY)};
-    startRect = {x:r.left, y:r.top, w:r.width, h:r.height};
-    window.addEventListener('mousemove', onDrag, {passive:false});
-    window.addEventListener('touchmove', onDrag, {passive:false});
-    window.addEventListener('mouseup', endDrag, {passive:false});
-    window.addEventListener('touchend', endDrag, {passive:false});
-  }
-
+ 
   
-function esc(s){
-  return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-}
-// ui.js
-function appendLogLine(e){
-  if (!consoleBox) return;
-  const nearBottom = (consoleBox.scrollTop + consoleBox.clientHeight) >= (consoleBox.scrollHeight - 8);
-  const t = new Date((e.ts || 0)*1000).toLocaleTimeString();
-  const lvl = (typeof e.lvl === "number") ? e.lvl : 1;
-  const sev = (e.sev) ? String(e.sev) : ({0:'ok',1:'info',2:'info',3:'warn',4:'err'}[lvl] || 'info');
-  const html =
-    `<span class="t">${esc(t)}</span> ` +
-    `<span class="tag tag-${sev}">[${esc(e.tag)}]</span> ${esc(e.msg)}
-`;
-  consoleBox.insertAdjacentHTML('beforeend', html);
-  if (nearBottom) consoleBox.scrollTop = consoleBox.scrollHeight;
-}
-
-function fetchLogs(){
-  if (modalOpen) return;
-  if (logPaused) return;
-  fetch(`/api/logs?after=${logAfter}&limit=200&ts=${Date.now()}`)
-    .then(r => r.ok ? r.json() : null)
-    .then(d => {
-      if (!d || !Array.isArray(d.items)) return;
-      d.items.forEach(appendLogLine);
-      if (typeof d.next === "number") logAfter = Math.max(logAfter, d.next);
-    })
-    .catch(()=>{});
-}
-btnLogPause?.addEventListener("click", () => {
-  logPaused = !logPaused;
-  btnLogPause.textContent = logPaused ? "Resume" : "Pause";
-});
-btnLogClear?.addEventListener("click", () => {
-  if (consoleBox) consoleBox.textContent = "";
-  logAfter = 0;   // start over from beginning of ring
-  // If you enabled the POST /api/logs/clear route server-side, you can also:
-  // fetch('/api/logs/clear', {method:'POST'}).catch(()=>{});
-});
-  function onDrag(e){
-    if(!dragMode) return;
-    e.preventDefault();
-    const px = (e.touches?e.touches[0].clientX:e.clientX);
-    const py = (e.touches?e.touches[0].clientY:e.clientY);
-    const dx = px - start.x, dy = py - start.y;
-    const IR = imageRectOnScreen();
-    const wrap = liveWrap.getBoundingClientRect();
-    let x = startRect.x, y = startRect.y, w = startRect.w, h = startRect.h;
-    if (dragMode==='move') { x+=dx; y+=dy; }
-    if (dragMode==='nw'){ x+=dx; y+=dy; w-=dx; h-=dy; }
-    if (dragMode==='ne'){ y+=dy; w+=dx; h-=dy; }
-    if (dragMode==='se'){ w+=dx; h+=dy; }
-    if (dragMode==='sw'){ x+=dx; w-=dx; h+=dy; }
-    // clamp to the visible image rect
-    const pad=14;
-    x = Math.max(IR.left, Math.min(x, IR.right-pad));
-    y = Math.max(IR.top , Math.min(y, IR.bottom-pad));
-    w = Math.max(pad, Math.min(w, IR.right - x));
-    h = Math.max(pad, Math.min(h, IR.bottom - y));
-    roiBox.style.left   = (x - wrap.left) + 'px';
-    roiBox.style.top    = (y - wrap.top)  + 'px';
-    roiBox.style.width  = w + 'px';
-    roiBox.style.height = h + 'px';
-  }
-  async function endDrag(e){
-    if(!dragMode) return;
-    dragMode=null;
-    window.removeEventListener('mousemove', onDrag);
-    window.removeEventListener('touchmove', onDrag);
-    window.removeEventListener('mouseup', endDrag);
-    window.removeEventListener('touchend', endDrag);
-    await pushROIToServer();
-  }
-  roiBox.addEventListener('mousedown', startDrag, {passive:false});
-  roiBox.addEventListener('touchstart', startDrag, {passive:false});
-  roiReset?.addEventListener('click', async ()=>{
-    normToOverlay([0,0,1,1]);
-    roiRead.textContent='ROI 0–100%';
-    await fetch('/api/detect_roi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roi:[0,0,1,1]})});
-  });
-  // keep ROI lined up when image loads or window resizes
-  liveImg.addEventListener('load', initROI);
-  window.addEventListener('resize', initROI);
-  document.addEventListener('DOMContentLoaded', initROI);
-
   // ---------- Stream pause/freeze ----------
   function freezeImage(img) {
     if (!img) return;
@@ -256,17 +570,47 @@ btnLogClear?.addEventListener("click", () => {
   });
 
   // ---------- Scryfall card info ----------
-  async function updateCardInfo(s) {
+  async function updateCardInfo(s, attempt = 0) {
     if (!ci || !s || !s.name) { if (ci) ci.innerHTML = ""; return; }
+    const updatedAt = Number(s.updated_at || 0);
+    if (updatedAt && updatedAt <= lastCardinfoSeq && attempt === 0) return;
+    if (cardinfoPending) return;
+
+    const headers = {};
+    if (lastCardinfoEtag) headers["If-None-Match"] = lastCardinfoEtag;
+
+    cardinfoPending = true;
     try {
-      const r = await fetch("/api/carddata?ts=" + Date.now());
+      const r = await fetch("/api/carddata", {
+        cache: "no-cache",
+        headers
+      });
+      const et = r.headers.get("ETag");
+      const etTs = (() => {
+        const m = (et || "").match(/card-(\d+)/);
+        return m ? Number(m[1]) / 1000 : null;
+      })();
+      if (r.status === 304) {
+        if (et) lastCardinfoEtag = et;
+        if (etTs !== null && !Number.isNaN(etTs)) {
+          lastCardinfoSeq = Math.max(lastCardinfoSeq, etTs);
+        }
+        return;
+      }
       if (!r.ok) return;
+      if (et) lastCardinfoEtag = et;
+
       const d = await r.json();
       if (!d || typeof d.last_updated !== "number") { if (ci) ci.innerHTML = ""; return; }
-      // Retry briefly if cardinfo backend is a little behind OCR
-      if ((d.last_updated || 0) < (s.updated_at || 0)) { setTimeout(() => updateCardInfo(s), 250); return; }
 
-      if (!d.scry) { setTimeout(() => updateCardInfo(s), 250); return; }
+      const lu = Number(d.last_updated || updatedAt || 0);
+      if (lu <= lastCardinfoSeq && attempt === 0) return;
+      lastCardinfoSeq = lu;
+
+      // Retry briefly if cardinfo backend is a little behind OCR
+      if (lu < updatedAt && attempt < 3) { setTimeout(() => updateCardInfo(s, attempt + 1), 250); return; }
+
+      if (!d.scry) { if (attempt < 3) setTimeout(() => updateCardInfo(s, attempt + 1), 250); return; }
       const c = d.scry || {};
       const p = c.prices || {};
       const fx = (d.fx && d.fx.rate) || 1.3;
@@ -325,7 +669,11 @@ btnLogClear?.addEventListener("click", () => {
             "</div>" +
           "</div>" +  
         "</div>";   
-    } catch {}
+    } catch (e) {
+      console.error("updateCardInfo failed", e);
+    } finally {
+      cardinfoPending = false;
+    }
   }
 
   // ---------- Bad list ----------
@@ -495,22 +843,19 @@ const SETTINGS_SCHEMA = [
       {k:"MAX_CARDS", label:"Max cards", type:"int"},
       {k:"DETECT_EVERY_N_FRAMES", label:"Detect cadence (N frames)", type:"int"},
       {k:"RECTANGULARITY_MIN", label:"Rectangularity min (0..1)", type:"float"},
+      {k:"DETECT_QUAD_PAD_PCT", label:"Quad pad pct (0..0.1)", type:"float"},
     ]
   },
   {
-    title: "Autoscan / Steady",
+    title: "Capture",
     items: [
-      {k:"STEADY_MIN_FRAMES", label:"Steady min frames", type:"int"},
-      {k:"AUTO_CAPTURE_WAIT_S", label:"Auto capture wait (s)", type:"float"},
+      {k:"AUTO_CAPTURE_WAIT_S", label:"Capture grace delay (s)", type:"float"},
       {k:"AUTOSCAN_OCR_TIMEOUT", label:"OCR timeout (s)", type:"float"},
-      {k:"AUTOSCAN_SCRY_TIMEOUT", label:"Scryfall timeout (s)", type:"float"},
-      {k:"AUTOSCAN_IMG_TIMEOUT", label:"Image timeout (s)", type:"float"},
     ]
   },
   {
     title: "OCR & Debug",
     items: [
-      {k:"OCR_BACKEND", label:"OCR backend (comma list)"},
       {k:"OCR_ONLY_ON_SNAPSHOT", label:"OCR only on snapshot", type:"bool"},
       {k:"DEBUG_OCR", label:"Debug OCR", type:"bool"},
       {k:"OCR_DEBUG_BOXES", label:"Draw OCR boxes", type:"bool"},
@@ -596,12 +941,16 @@ const SETTINGS_SCHEMA = [
     ]
   },
   {
+    title: "Stacks / Sorter",
+    items: [
+      {k:"CARD_THICKNESS_MM", label:"Card thickness (mm)", type:"float"},
+      {k:"REMEASURE_EVERY", label:"Remeasure every N cards (0 = off)", type:"int"},
+    ]
+  },
+  {
     title: "Debug & Paths",
     items: [
-      {k:"DEBUG_LEVEL", label:"Debug level", type:"int"},
-      {k:"DEBUG_SAVE_ROI", label:"Save ROI crops", type:"bool"},
-      {k:"DEBUG_DIR", label:"Debug dir"},
-      {k:"BAD_DIR", label:"Bad-list dir"},
+      {k:"DEBUG_LEVEL", label:"Debug level (1-4)", type:"int"},
     ]
   },
   {
@@ -741,6 +1090,7 @@ function fieldEl(it, val) {
   if (it.type === 'bool') {
     const sel = document.createElement('select');
     sel.id = id;
+    sel.className = 'mm-input';
     ['true', 'false'].forEach((v) => {
       const o = document.createElement('option');
       o.value = v;
@@ -752,28 +1102,11 @@ function fieldEl(it, val) {
     return wrap;
   }
 
-  if (it.type === 'roi') {
-    const r = Array.isArray(val) ? val : [0, 0, 1, 1];
-    const box = document.createElement('div');
-    box.className = 'roi';
-    ['x0', 'y0', 'x1', 'y1'].forEach((name, i) => {
-      const input = document.createElement('input');
-      input.type = 'number';
-      input.step = '0.001';
-      input.min = '0';
-      input.max = '1';
-      input.id = `${id}_${name}`;
-      input.value = r[i] ?? 0;
-      box.appendChild(input);
-    });
-    wrap.appendChild(box);
-    return wrap;
-  }
-
   const inp = document.createElement('input');
   inp.id = id;
   inp.type = 'text';
   inp.value = val ?? '';
+  inp.className = 'mm-input';
   if (it.type === 'int') inp.inputMode = 'numeric';
   if (it.type === 'float') inp.inputMode = 'decimal';
   wrap.appendChild(inp);
@@ -788,11 +1121,6 @@ function collect() {
       const id = 's__' + it.k;
       if (it.type === 'bool') {
         out[it.k] = (document.getElementById(id).value === 'true');
-      } else if (it.type === 'roi') {
-        const vals = ['x0', 'y0', 'x1', 'y1'].map((n) =>
-          parseFloat(document.getElementById(`${id}_${n}`).value || '0')
-        );
-        out[it.k] = vals;
       } else {
         const v = document.getElementById(id).value;
         if (it.type === 'int') out[it.k] = parseInt(v || '0', 10);
@@ -834,59 +1162,98 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
   function renderScans(scans) {
     if (!revList || !revCount) return;
     const items = Array.isArray(scans.items) ? scans.items : [];
+    rememberScanMeta(items);
 
     revList.innerHTML = items.map(function (it) {
-      const cls = (it.status === "pass" ? "ok" : "bad");
+      const st = String(it.status || "fail").toLowerCase();
+      const cls = (st === "pass" ? "ok" : (st === "review" ? "warn" : "bad"));
       const score = Number(it.match_score || 0);
-      const numStr = (it.number ? ("• #" + it.number) : "");
-      return (
-        '<div class="revitem" data-id="' + it.id + '" data-status="' + (it.status || "fail") + '">' +
-          '<img class="thumb" loading="lazy" src="/api/scan/' + it.id + '/thumb">' +
-          '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;">' +
-            '<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">' +
-              '<div style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b>' +
-                (it.name || "(unnamed)") + "</b> " + numStr +
-              "</div>" +
-              '<span class="pill ' + cls + '">VISUAL - ' + String((it.status || "FAIL")).toUpperCase() + "</span>" +
-            "</div>" +
-            '<div class="meta"><span>Visual Score: ' + (score*100).toFixed(2) + "%</span>" +
-              (it.scry_set ? ('<span>' + String(it.scry_set).toUpperCase() + " " + (it.scry_cn || "") + "</span>") : "") +
-              
-              (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length
-                ? '<span class="pill warn" title="' + it.review_reasons.join(' • ').replace(/"/g,'&quot;') + '">Review Req.</span>'
-                : "") +
-            "</div>" +
-          "</div>" +
-        "</div>"
-      );
+      const numStr = (it.number ? (` • #${esc(it.number)}`) : "");
+      const thumbHtml = it.thumb_ok
+        ? `<img class="thumb" loading="lazy" src="/api/scan/${it.id}/thumb" alt="scan ${it.id}">`
+        : '<div class="thumb thumb-missing" aria-label="No snapshot">No Image</div>';
+      const setStr = it.scry_set
+        ? `<span>${esc(String(it.scry_set).toUpperCase())} ${esc(it.scry_cn || "")}</span>`
+        : (it.set_hint ? `<span>${esc(String(it.set_hint).toUpperCase())}</span>` : "");
+      const warn = (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length)
+        ? `<span class="pill warn" title="${it.review_reasons.join(' • ').replace(/"/g,'&quot;')}">Review Req.</span>`
+        : "";
+      return `
+        <div class="revitem" data-id="${it.id}" data-status="${esc(it.status || "fail")}">
+          ${thumbHtml}
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;">
+            <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;">
+              <div style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><b>${esc(it.name || "(unnamed)")}</b>${numStr}</div>
+              <span class="pill ${cls}">VISUAL - ${String((it.status || "FAIL")).toUpperCase()}</span>
+            </div>
+            <div class="meta">
+              <span>Visual Score: ${(score * 100).toFixed(2)}%</span>
+              ${setStr}
+              ${warn}
+            </div>
+            <div class="revitem-actions">
+              <button type="button" class="btn btn-mini btn-ghost rev-edit" data-id="${it.id}">Manual Edit</button>
+            </div>
+          </div>
+        </div>
+      `;
     }).join("");
 
+    const summary = scans?.summary || null;
     const total = Number(
-      (scans && (scans.total ?? scans.count)) || items.length || 0
+      (summary && summary.total) ??
+      (scans && (scans.total ?? scans.count)) ??
+      items.length ??
+      0
     );
     const shown = items.length;
-    let label = `${total.toLocaleString()} items`;
+    const passCount = summary?.pass ?? items.filter(it => (it.status || "").toLowerCase() === "pass").length;
+    const failCount = summary?.fail ?? items.filter(it => (it.status || "").toLowerCase() === "fail").length;
+    const reviewCount = summary?.review ?? items.filter(it => (it.status || "").toLowerCase() === "review").length;
+    let label = `${total.toLocaleString()} cards`;
     if (total > shown && shown > 0) {
       label += ` (showing ${shown.toLocaleString()})`;
     }
+    const breakdown = [
+      typeof passCount === "number" ? `Pass ${passCount.toLocaleString()}` : null,
+      typeof failCount === "number" ? `Fail ${failCount.toLocaleString()}` : null,
+      typeof reviewCount === "number" ? `Review ${reviewCount.toLocaleString()}` : null,
+    ].filter(Boolean);
+    if (breakdown.length) {
+      label += ` • ${breakdown.join(" | ")}`;
+    }
     revCount.textContent = label;
+    attachThumbFallbacks(revList);
     Array.from(revList.querySelectorAll(".revitem")).forEach(function (el) {
-      el.addEventListener("click", function () {
+      el.addEventListener("click", async function () {
         const id = Number(el.getAttribute("data-id"));
-        fetch("/api/scan/" + id + "/load", { method: "POST" })
-          .then(r => r.json())
-          .then(function (res) {
-            if (res && res.ok) {
-              currentLoadedId = id;
-              if (btnPass) btnPass.disabled = false;
-              if (btnFail) btnFail.disabled = false;
-              if (btnEdit) btnEdit.disabled = false;
-              if (btnDelete) btnDelete.disabled = false;
-              const cmp = document.getElementById("cmpimg");
-              if (cmp) cmp.src = "/compare.jpg?ts=" + Date.now();
-              fetchState();
-            }
-          });
+        try {
+          const resp = await fetch(`/api/scan/${id}/load`, { method: "POST" });
+          const res = await resp.json().catch(() => ({}));
+          if (!resp.ok || !res?.ok) {
+            alert(res?.error || "Unable to load this scan right now (scanner busy?).");
+            return;
+          }
+          currentLoadedId = id;
+          if (btnPass) btnPass.disabled = false;
+          if (btnFail) btnFail.disabled = false;
+          if (btnEdit) btnEdit.disabled = false;
+          if (btnDelete) btnDelete.disabled = false;
+          refreshCompare(Date.now());
+          fetchState();
+        } catch (err) {
+          console.error("History load failed", err);
+        }
+      });
+    });
+    revList.querySelectorAll(".rev-edit").forEach(btn => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const id = Number(btn.getAttribute("data-id"));
+        if (!openManualEditById(id)) {
+          currentLoadedId = id;
+          openEditModal({ id });
+        }
       });
     });
   }
@@ -911,28 +1278,48 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       .then(function (s) {
         lastState = s;
 
-        const scannerPills = [
-          { txt: (s.locked ? "Locked" : "Searching"), cls: (s.locked ? "ok" : "warn") }
-        ];
-        const foilNow = (typeof s.foil !== "undefined") ? s.foil : s.ocr_foil;
-        const foilSc  = (typeof s.foil_score !== "undefined") ? s.foil_score : s.ocr_foil_score;
-        if (typeof foilNow !== "undefined") {
-          const fs = (typeof foilSc === "number" ? foilSc.toFixed(2) : "—");
-          scannerPills.push({ txt: (foilNow ? ("Foil • " + fs) : "Non-foil"), cls: (foilNow ? "ok" : "warn") });
-        }
+        const scannerPills = [];
         scannerPills.push({ txt: (s.snapshot_present ? ("Snapshot " + (s.snapshot_age_sec || 0) + "s ago") : "No Snapshot"), cls: (s.snapshot_present ? "ok" : "warn") });
-        if (s.steady) scannerPills.push({ txt: "STEADY", cls: "ok" });
+        const blurVal = (typeof s.steady_blur === "number") ? s.steady_blur.toFixed(1) : null;
+        const motionVal = (typeof s.steady_motion === "number") ? s.steady_motion.toFixed(3) : null;
+        const steadyTitle = (blurVal !== null && motionVal !== null) ? ("blur " + blurVal + " • motion " + motionVal) : "";
+        scannerPills.push({ txt: (s.steady ? "STEADY" : "UNSTEADY"), cls: (s.steady ? "ok" : "warn"), title: steadyTitle });
         updatePills(sc, scannerPills);
 
         const p1p = [{ txt: (s.ws_connected ? "WS connected" : "WS offline"), cls: (s.ws_connected ? "ok" : "bad") }];
         if (s.awaiting) p1p.push({ txt: "Most recent scan - Job #" + s.job_id, cls: "warn" });
         if (s.last_decision) p1p.push({ txt: s.last_decision, cls: "ok" });
+        const stacks = s.stacks || {};
+        const rem = stacks.remaining_cards || [];
+        const start = stacks.start_cards || [];
+        const heights = stacks.current_height || [];
+        [0, 1].forEach((i) => {
+          const rc = rem[i];
+          const startTxt = (typeof start[i] === "number") ? ` of ${start[i]}` : "";
+          const hTxt = (typeof heights[i] === "number") ? ` (${heights[i].toFixed(2)}mm)` : "";
+          const txt = (typeof rc === "number")
+            ? `Stack ${i + 1}: ${rc}${startTxt} cards${hTxt}`
+            : `Stack ${i + 1}: —${startTxt} ${hTxt}`.trim();
+          p1p.push({ txt, cls: (typeof rc === "number" ? "ok" : "warn") });
+        });
         updatePills(p1, p1p);
 
         const ocrPills = [];
+        const foilNow = (typeof s.ocr_foil !== "undefined") ? s.ocr_foil : s.foil;
+        const foilSc  = (typeof s.ocr_foil_score !== "undefined") ? s.ocr_foil_score : s.foil_score;
+        if (s.snapshot_present && typeof foilNow !== "undefined") {
+          const fs = (typeof foilSc === "number" ? foilSc.toFixed(2) : "—");
+          ocrPills.push({ txt: (foilNow ? ("Foil • " + fs) : "Non-foil"), cls: (foilNow ? "ok" : "warn") });
+        }
         if (s.name) { ocrPills.push({ txt: "Name: " + s.name, cls: "ok" }, { txt: "conf " + Math.round(s.name_conf || 0), cls: "ok" }); }
         else { ocrPills.push({ txt: "Name: —", cls: "warn" }); }
-        if (s.number) { ocrPills.push({ txt: "No: " + s.number, cls: "ok" }, { txt: "conf " + Math.round(s.number_conf || 0), cls: "ok" }); }
+        if (s.number) {
+          const numConf = Math.max(0, Math.round(s.number_conf || 0));
+          const confCls = (numConf >= 65) ? "ok" : (numConf >= 30 ? "warn" : "bad");
+          const numCls = (numConf >= 20) ? "ok" : "warn";
+          ocrPills.push({ txt: "No: " + s.number, cls: numCls });
+          ocrPills.push({ txt: "conf " + numConf, cls: confCls });
+        }
         if (s.set_hint) ocrPills.push({ txt: "Set: " + String(s.set_hint).toUpperCase(), cls: "ok" });
         if (typeof s.match_ok !== "undefined" && s.match_ok !== null) {
           const ms = Number(s.match_score || 0).toFixed(2);
@@ -947,13 +1334,14 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         if (s.last_error) ocrPills.push({ txt: "OCR err: " + s.last_error, cls: "bad" });
         updatePills(ocrEl, ocrPills);
 
-        const cmp = document.getElementById("cmpimg");
-        if (cmp) cmp.src = "/compare.jpg?ts=" + Date.now();
+        const cmpSeq = Number(s.cmp_seq || 0);
+        if (cmpSeq && cmpSeq !== lastCmpSeq) refreshCompare(cmpSeq);
 
         currentLoadedId = s.loaded_scan_id || currentLoadedId;
         if (btnPass) btnPass.disabled = !currentLoadedId;
         if (btnFail) btnFail.disabled = !currentLoadedId;
         if (btnEdit) btnEdit.disabled = !currentLoadedId;
+        if (btnReprocess) btnReprocess.disabled = !currentLoadedId;
         if (btnDelete) btnDelete.disabled = !currentLoadedId;
         updateCardInfo(s);
         fetchBad();
@@ -993,19 +1381,24 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
           currentLoadedId = null;
           fetchScans();
           fetchState();
-          const cmp = document.getElementById("cmpimg");
-          if (cmp) cmp.src = "/compare.jpg?ts=" + Date.now();
+          refreshCompare(Date.now());
         }
       }).catch(() => {});
   };
 
   // ---------- Edit modal ----------
-  function openEditModal() {
+  function openEditModal(prefillMeta) {
     if (!modal) return;
-    const name = (lastState && (lastState.name || lastState.name_raw)) || "";
-    const set  = (lastState && (lastState.set_hint || "")) || "";
-    const num  = (lastState && (lastState.number_raw || lastState.number || "")) || "";
-    eiName.value = name; eiSet.value = set; eiNum.value = num;
+    const meta = prefillMeta || lastState || {};
+    const targetId = (prefillMeta && prefillMeta.id) || currentLoadedId;
+    if (!targetId) return;
+    activeEditId = targetId;
+    const name = meta.name || meta.name_raw || meta.scry_name || "";
+    const set  = meta.set_hint || meta.scry_set || "";
+    const num  = meta.number_raw || meta.number || meta.scry_cn || "";
+    eiName.value = name;
+    eiSet.value = set;
+    eiNum.value = num;
     eiResults.innerHTML = ""; chosenScryId = null;
     // ensure it's visible even if it has the 'hidden' utility class
     modal.classList.remove('hidden');
@@ -1017,6 +1410,8 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     modal.classList.remove('show');
     modal.setAttribute('aria-hidden','true');
     modal.classList.add('hidden');                   // <-- important
+    activeEditId = null;
+    chosenScryId = null;
     const f = document.getElementById('filter-modal');
     const e = document.getElementById('export-modal');
     if ((f?.classList.contains('hidden') ?? true) && (e?.classList.contains('hidden') ?? true)) {
@@ -1025,21 +1420,361 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
   }
   btnEdit?.addEventListener('click', (e)=>{ e.preventDefault(); if (currentLoadedId) openEditModal(); });
 
+  function setReprocessStatus(msg) {
+    if (reprocessStatus) reprocessStatus.textContent = msg;
+  }
+  function renderReasons(el, reasons) {
+    if (!el) return;
+    const list = Array.isArray(reasons) ? reasons : [];
+    if (!list.length) {
+      el.innerHTML = '<li class="muted">None</li>';
+    } else {
+      el.innerHTML = list.map(r => `<li>${esc(r)}</li>`).join("");
+    }
+  }
+  function fillReprocessColumns(oldData, newData) {
+    const oldScore = typeof oldData?.match_score === "number" ? (Number(oldData.match_score)*100).toFixed(2) + "%" : "—";
+    const newScore = typeof newData?.match_score === "number" ? (Number(newData.match_score)*100).toFixed(2) + "%" : "—";
+    if (reOldName) reOldName.textContent = oldData?.name || "(unnamed)";
+    if (reOldSet) reOldSet.textContent = (oldData?.set_hint || "").toUpperCase() || "—";
+    if (reOldNumber) reOldNumber.textContent = oldData?.number || "—";
+    if (reOldScore) reOldScore.textContent = oldScore;
+    if (reOldFlag) reOldFlag.textContent = oldData?.flagged ? "Yes" : "No";
+    if (reOldCmp) {
+      if (oldData?.cmp_data_url) {
+        reOldCmp.src = oldData.cmp_data_url;
+        reOldCmp.classList.remove("hidden");
+      } else {
+        reOldCmp.classList.add("hidden");
+        reOldCmp.removeAttribute("src");
+      }
+    }
+    renderReasons(reOldReasons, oldData?.review_reasons);
+
+    if (reNewName) reNewName.textContent = newData?.name || "(unnamed)";
+    if (reNewSet) reNewSet.textContent = (newData?.set_hint || "").toUpperCase() || "—";
+    if (reNewNumber) reNewNumber.textContent = newData?.number || "—";
+    if (reNewScore) reNewScore.textContent = newScore;
+    if (reNewFlag) reNewFlag.textContent = newData?.flagged ? "Yes" : "No";
+    if (reNewCmp) {
+      if (newData?.cmp_data_url) {
+        reNewCmp.src = newData.cmp_data_url;
+        reNewCmp.classList.remove("hidden");
+      } else {
+        reNewCmp.classList.add("hidden");
+        reNewCmp.removeAttribute("src");
+      }
+    }
+    if (reNewScry) {
+      const setText = newData?.scry_set ? String(newData.scry_set).toUpperCase() : "";
+      const cn = newData?.scry_cn || "";
+      let scryTxt = newData?.scry_name || "";
+      if (setText || cn) {
+        scryTxt = `${setText} ${cn}`.trim() + (scryTxt ? ` • ${scryTxt}` : "");
+      }
+      reNewScry.textContent = scryTxt || "—";
+    }
+    renderReasons(reNewReasons, newData?.review_reasons);
+  }
+  async function openReprocessModalForScan(sid) {
+    if (!reModal || !sid) return;
+    reprocessTargetId = sid;
+    reprocessToken = null;
+    reprocessApply?.setAttribute("disabled","disabled");
+    setReprocessStatus("Starting reprocess…");
+    setProgressBar(reprocessProgressBar, 0);
+    reprocessProgressStop = startProgressRamp(reprocessProgressBar, 0.85, 0.008, 100);
+    reprocessContent?.classList.add("hidden");
+    reModal.classList.remove("hidden");
+    document.getElementById('filter-backdrop')?.classList.remove('hidden');
+    reModal.classList.add("show");
+    try {
+      const data = await fetchWithFallback(
+        [`/api/scan/${sid}/reprocess?mode=sync`, `/api/scan/${sid}/reprocess`],
+        {method:'POST'}
+      );
+      if (!data || data.ok === false) {
+        throw new Error((data && data.error) || "Unable to reprocess");
+      }
+      reprocessToken = data.token;
+      fillReprocessColumns(data.old || {}, data.candidate || {});
+      setReprocessStatus("Review the new detection and accept to overwrite.");
+      reprocessContent?.classList.remove("hidden");
+      reprocessApply?.removeAttribute("disabled");
+      setProgressBar(reprocessProgressBar, 1);
+    } catch (err) {
+      setReprocessStatus("Reprocess failed: " + err.message);
+      setProgressBar(reprocessProgressBar, 0);
+    } finally {
+      reprocessProgressStop = stopIndeterminateBar(reprocessProgressStop, null);
+    }
+  }
+  function closeReprocessModal() {
+    if (!reModal) return;
+    reModal.classList.remove("show");
+    setTimeout(()=>{
+      reModal.classList.add("hidden");
+      hideBackdropIfNone();
+    }, 50);
+    reprocessToken = null;
+    reprocessTargetId = null;
+    reprocessApply?.setAttribute("disabled","disabled");
+    reprocessContent?.classList.add("hidden");
+    setReprocessStatus("Preparing…");
+    reprocessProgressStop = stopIndeterminateBar(reprocessProgressStop, reprocessProgressBar, 0);
+  }
+  btnReprocess?.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (currentLoadedId) {
+      openReprocessModalForScan(currentLoadedId);
+    }
+  });
+  reprocessClose?.addEventListener("click", closeReprocessModal);
+  reprocessReject?.addEventListener("click", closeReprocessModal);
+  reModal?.addEventListener("click", (e) => {
+    if (e.target === reModal || e.target.classList.contains("backdrop")) {
+      closeReprocessModal();
+    }
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && reModal?.classList.contains("show")) {
+      closeReprocessModal();
+    }
+  });
+  reprocessApply?.addEventListener("click", async () => {
+    if (!reprocessToken || !reprocessTargetId) return;
+    reprocessApply.setAttribute("disabled","disabled");
+    setReprocessStatus("Applying new result…");
+    try {
+      const res = await fetch(`/api/scan/${reprocessTargetId}/reprocess/apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: reprocessToken })
+      });
+      const data = await res.json();
+      if (!data || !data.ok) {
+        throw new Error((data && data.error) || "Unable to apply");
+      }
+      closeReprocessModal();
+      fetchState();
+      fetchScans();
+      try { refreshHistoryGrid(); } catch {}
+    } catch (err) {
+      setReprocessStatus("Apply failed: " + err.message);
+      reprocessApply?.removeAttribute("disabled");
+    }
+  });
+
+  function setBatchStatus(msg) {
+    if (batchStatus) batchStatus.textContent = msg;
+  }
+  function closeBatchModal() {
+    if (!batchModal) return;
+    batchModal.classList.remove("show");
+    setTimeout(()=>batchModal.classList.add("hidden"), 50);
+    reprocessBatchItems = [];
+    if (batchList) {
+      batchList.innerHTML = "";
+      batchList.classList.add("hidden");
+    }
+    setBatchStatus("Preparing…");
+    batchOverallProgressStop = stopIndeterminateBar(batchOverallProgressStop, batchOverallBar, 0);
+    batchCurrentProgressStop = stopIndeterminateBar(batchCurrentProgressStop, batchCurrentBar, 0);
+    hideBackdropIfNone();
+  }
+  function renderBatchList() {
+    if (!batchList) return;
+    if (!reprocessBatchItems.length) {
+      batchList.innerHTML = "";
+      batchList.classList.add("hidden");
+      setBatchStatus("No review items need updates.");
+      return;
+    }
+    batchList.classList.remove("hidden");
+    const html = reprocessBatchItems.map(item => {
+      const oldName = esc(item.old?.name || "(unnamed)");
+      const newName = esc(item.candidate?.name || "(unnamed)");
+      const oldSet = esc((item.old?.set_hint || "").toUpperCase()) || "—";
+      const newSet = esc((item.candidate?.set_hint || "").toUpperCase()) || "—";
+      const oldNumber = esc(item.old?.number || "—");
+      const newNumber = esc(item.candidate?.number || "—");
+      const oldScore = typeof item.old?.match_score === "number" ? (Number(item.old.match_score)*100).toFixed(1)+"%" : "—";
+      const newScore = typeof item.candidate?.match_score === "number" ? (Number(item.candidate.match_score)*100).toFixed(1)+"%" : "—";
+      const oldReasons = (item.old?.review_reasons || []).map(r => `<li>${esc(r)}</li>`).join("") || '<li class="muted">None</li>';
+      const newReasons = (item.candidate?.review_reasons || []).map(r => `<li>${esc(r)}</li>`).join("") || '<li class="muted">None</li>';
+      const scryTxt = (() => {
+        const setTxt = item.candidate?.scry_set ? String(item.candidate.scry_set).toUpperCase() : "";
+        const cn = item.candidate?.scry_cn || "";
+        let nm = item.candidate?.scry_name || "";
+        if (setTxt || cn) {
+          nm = `${setTxt} ${cn}`.trim() + (nm ? ` • ${nm}` : "");
+        }
+        return nm || "—";
+      })();
+      return `
+        <div class="reproc-batch-item" data-token="${item.token}">
+          <h4>#${item.id} ${oldName}</h4>
+          <div class="reproc-batch-columns">
+            <div>
+              <div class="reproc-field"><span>Current</span><strong>${oldName}</strong></div>
+              <div class="reproc-field"><span>Set</span><strong>${oldSet}</strong></div>
+              <div class="reproc-field"><span>Number</span><strong>${oldNumber}</strong></div>
+              <div class="reproc-field"><span>Match</span><strong>${oldScore}</strong></div>
+              <ul class="reproc-reasons">${oldReasons}</ul>
+            </div>
+            <div>
+              <div class="reproc-field"><span>New OCR</span><strong>${newName}</strong></div>
+              <div class="reproc-field sub"><span>Suggested</span><em>${esc(scryTxt)}</em></div>
+              <div class="reproc-field"><span>Set</span><strong>${newSet}</strong></div>
+              <div class="reproc-field"><span>Number</span><strong>${newNumber}</strong></div>
+              <div class="reproc-field"><span>Match</span><strong>${newScore}</strong></div>
+              <ul class="reproc-reasons">${newReasons}</ul>
+            </div>
+          </div>
+          <div class="reproc-batch-actions">
+            <button type="button" class="btn btn-ghost" data-rebatch-action="reject" data-token="${item.token}">Reject</button>
+            <button type="button" class="btn btn-primary" data-rebatch-action="accept" data-token="${item.token}">Accept</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+    batchList.innerHTML = html;
+  }
+  async function openBatchModal() {
+    if (!batchModal) return;
+    document.getElementById('filter-backdrop')?.classList.remove('hidden');
+    batchModal.classList.remove("hidden");
+    batchModal.classList.add("show");
+    setBatchStatus("Reprocessing review items…");
+    setProgressBar(batchOverallBar, 0);
+    setProgressBar(batchCurrentBar, 0);
+    batchOverallProgressStop = null;
+    batchCurrentProgressStop = null;
+    batchList?.classList.add("hidden");
+    reprocessBatchItems = [];
+    try {
+      let data = null;
+      let usedAsync = false;
+      try {
+        const res = await fetch('/api/reprocess/flagged?mode=async', {method:'POST'});
+        data = await res.json();
+        usedAsync = !!(data && data.job);
+      } catch (_err) {
+        data = null;
+      }
+      if (!data || data.ok === false || (!data.job && !Array.isArray(data?.items))) {
+        batchOverallProgressStop = startProgressRamp(batchOverallBar, 0.85, 0.0065, 160);
+        batchCurrentProgressStop = startProgressRamp(batchCurrentBar, 0.85, 0.008, 180);
+        data = await fetchWithFallback(
+          ['/api/reprocess/flagged?mode=sync', '/api/reprocess/flagged'],
+          {method:'POST'}
+        );
+      }
+      if (!data || !data.ok) {
+        throw new Error((data && data.error) || "Unable to start batch");
+      }
+      if (data.job) {
+        const total = data.total || 0;
+        const jobData = await pollReprocessJob(data.job, (status)=>{
+          const totalCards = status?.total || total || 1;
+          const done = Math.min(totalCards, status?.done || 0);
+          const cardFrac = (typeof status?.current_card_progress === "number") ? status.current_card_progress : 0;
+          const overall = (typeof status?.progress === "number")
+            ? status.progress
+            : (totalCards ? (done + cardFrac) / totalCards : 0);
+          setProgressBar(batchOverallBar, overall);
+          setProgressBar(batchCurrentBar, cardFrac);
+          const phase = status?.current_phase ? String(status.current_phase).replace(/_/g," ") : "";
+          const currentLabel = status?.current_card ? `Card #${status.current_card}` : "";
+          setBatchStatus(`Processing ${done}/${totalCards} ${currentLabel} ${phase}`.trim());
+        });
+        reprocessBatchItems = Array.isArray(jobData?.items) ? jobData.items : [];
+      } else {
+        // synchronous fallback - use ramp to hint activity
+        batchOverallProgressStop = startProgressRamp(batchOverallBar, 0.85, 0.0065, 160);
+        batchCurrentProgressStop = startProgressRamp(batchCurrentBar, 0.85, 0.008, 180);
+        reprocessBatchItems = Array.isArray(data.items) ? data.items : [];
+      }
+      if (!reprocessBatchItems.length) {
+        setBatchStatus("No review items require reprocessing.");
+      } else {
+        setBatchStatus(`Review ${reprocessBatchItems.length} updated card${reprocessBatchItems.length === 1 ? "" : "s"}.`);
+      }
+      renderBatchList();
+      setProgressBar(batchOverallBar, 1);
+      setProgressBar(batchCurrentBar, 0);
+    } catch (err) {
+      setBatchStatus("Batch reprocess failed: " + err.message);
+      setProgressBar(batchOverallBar, 0);
+      setProgressBar(batchCurrentBar, 0);
+    } finally {
+      batchOverallProgressStop = stopIndeterminateBar(batchOverallProgressStop, null);
+      batchCurrentProgressStop = stopIndeterminateBar(batchCurrentProgressStop, null);
+    }
+  }
+  btnReprocessBatch?.addEventListener("click", (e)=>{
+    e.preventDefault();
+    openBatchModal();
+  });
+  batchClose?.addEventListener("click", closeBatchModal);
+  batchDone?.addEventListener("click", closeBatchModal);
+  batchModal?.addEventListener("click", (e)=>{
+    if (e.target === batchModal || e.target.classList.contains("backdrop")) closeBatchModal();
+  });
+  window.addEventListener("keydown", (e)=>{
+    if (e.key === "Escape" && batchModal?.classList.contains("show")) closeBatchModal();
+  });
+  batchList?.addEventListener("click", async (e)=>{
+    const btn = e.target.closest("[data-rebatch-action]");
+    if (!btn) return;
+    const action = btn.getAttribute("data-rebatch-action");
+    const token = btn.getAttribute("data-token");
+    if (!token) return;
+    if (action === "reject") {
+      reprocessBatchItems = reprocessBatchItems.filter(it => it.token !== token);
+      renderBatchList();
+      return;
+    }
+    if (action === "accept") {
+      btn.disabled = true;
+      try {
+        const item = reprocessBatchItems.find(it => it.token === token);
+        if (!item) throw new Error("Token expired");
+        const res = await fetch(`/api/scan/${item.id}/reprocess/apply`, {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({token})
+        });
+        const data = await res.json();
+        if (!data || !data.ok) throw new Error((data && data.error) || "Apply failed");
+        reprocessBatchItems = reprocessBatchItems.filter(it => it.token !== token);
+        renderBatchList();
+        fetchScans();
+        fetchState();
+        try { refreshHistoryGrid(); } catch {}
+      } catch (err) {
+        btn.disabled = false;
+        setBatchStatus("Apply failed: " + err.message);
+      }
+    }
+  });
+
   // ---- All History (fullscreen grid) ----
   function ensureHistoryModals() {
     if (!document.getElementById('history-modal')) {
       const tpl = document.createElement('div');
       tpl.innerHTML = `
-      <div id="history-modal" class="mm-modal hidden fullscreen" aria-hidden="true">
-        <div class="mm-modal__header">
+      <div id="history-modal" class="mm-modal hidden history-popup" aria-hidden="true"
+        style="position:fixed;top:20px;bottom:20px;left:50%;transform:translate(-50%,0);width:min(1200px,calc(100vw - 40px));max-width:calc(100vw - 40px);height:calc(100vh - 40px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;z-index:100;">
+        <div class="mm-modal__header" style="position:sticky;top:0;z-index:1;">
           <div class="mm-title">All History</div><button class="btn btn-pill" id="history-filter">Filters…</button>
           <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
         </div>
-        <div class="mm-modal__body">
-          <div id="history-grid" class="history-grid" aria-label="All history grid"></div>
+        <div class="mm-modal__body" style="flex:1 1 auto;min-height:0;overflow:auto;padding:16px;">
+          <div id="history-grid" class="history-grid history-grid-inline" aria-label="All history grid"></div>
         </div>
       </div>
-      <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;" aria-hidden="true">
+      <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;z-index:120;" aria-hidden="true">
         <div class="mm-modal__header">
           <div class="mm-title">Choose Action</div>
           <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
@@ -1049,6 +1784,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
             <button class="btn btn-pill btn-primary" id="histopt-pass">Mark Pass</button>
             <button class="btn btn-pill"              id="histopt-fail">Mark Fail</button>
             <button class="btn btn-pill"              id="histopt-edit">Load Data</button>
+            <button class="btn btn-pill"              id="histopt-reprocess">Reprocess…</button>
             <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
           </div>
         </div>
@@ -1062,35 +1798,61 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
 
   let histSelectedId = null;
   function openBackdrop() { filterBackdrop?.classList.remove("hidden"); }
+  function _anyModalOpen() {
+    // Treat both legacy `.modal.show` dialogs and newer `.mm-modal` sheets as “open”.
+    const ids = ["filter-modal","export-modal","export-modal-txt","export-modal-csv","printer-modal","settings-modal","history-modal","history-options-modal","reprocessModal","reprocessBatchModal"];
+    const idOpen = ids
+      .map(id=>document.getElementById(id))
+      .some(el => el && !el.classList.contains("hidden"));
+    if (idOpen) return true;
+    // Fallback: scan for any modal currently shown that might have been missed by the ID list.
+    return !!document.querySelector(".modal.show:not(.hidden), .mm-modal:not(.hidden)");
+  }
   function hideBackdropIfNone() {
-    const ids = ["filter-modal","export-modal","export-modal-txt","export-modal-csv","printer-modal","settings-modal","history-modal","history-options-modal"];
-    const anyOpen = ids.map(id=>document.getElementById(id)).some(el => el && !el.classList.contains("hidden"));
-    if (!anyOpen) filterBackdrop?.classList.add("hidden");
+    if (!_anyModalOpen()) {
+      filterBackdrop?.classList.add("hidden");
+    }
   }
 
   function renderHistoryGrid(items) {
     const grid = document.getElementById("history-grid");
     if (!grid) return;
+    grid.classList.add("history-grid-inline");
+    Object.assign(grid.style, {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+      gap: "10px",
+    });
+    rememberScanMeta(items);
     grid.innerHTML = items.map(function (it) {
-      const cls = (it.status === "pass" ? "ok" : "bad");
+      const st = String(it.status || "fail").toLowerCase();
+      const cls = (st === "pass" ? "ok" : (st === "review" ? "warn" : "bad"));
       const score = Number(it.match_score || 0);
-      const numStr = it.number ? `• #${it.number}` : "";
-      const setStr = it.scry_set ? `${String(it.scry_set).toUpperCase()} ${it.scry_cn || ""}` : "";
-      const scryName = it.scry_name ? `→ ${it.scry_name}` : "";
+      const numStr = it.number ? `#${esc(it.number)}` : "";
+      const setLine = it.scry_set
+        ? `${esc(String(it.scry_set).toUpperCase())} ${esc(it.scry_cn || "")}`
+        : (it.set_hint ? `${esc(String(it.set_hint).toUpperCase())}` : "");
+      const scryName = it.scry_name ? `→ ${esc(it.scry_name)}` : "";
       const warn = (it.flagged && Array.isArray(it.review_reasons) && it.review_reasons.length)
         ? `<span class="pill warn" title="${(it.review_reasons||[]).join(' • ').replace(/"/g,'&quot;')}">Review Req.</span>`
         : "";
+      const thumbHtml = it.thumb_ok
+        ? `<img class="thumb" loading="lazy" src="/api/scan/${it.id}/thumb" alt="scan ${it.id}">`
+        : '<div class="thumb thumb-missing" aria-label="No snapshot">No Image</div>';
+      const metaLine = [
+        `${(score*100).toFixed(1)}%`,
+        setLine
+      ].filter(Boolean).join(" • ");
       return `
         <div class="hcard" data-id="${it.id}">
-          <img class="thumb" loading="lazy" src="/api/scan/${it.id}/thumb" alt="scan ${it.id}">
+          ${thumbHtml}
           <div class="row">
-            <div class="title">${(it.name || "(unnamed)")} ${numStr}</div>
+            <div class="title">${esc(it.name || "(unnamed)")} ${numStr ? "• " + numStr : ""}</div>
             <span class="pill ${cls}">${String((it.status || "FAIL")).toUpperCase()}</span>
           </div>
           <div class="meta">
-            <span>Visual: ${(score*100).toFixed(2)}%</span>
-            ${setStr ? `<span>${setStr}</span>` : ""}
-            ${scryName ? `<span>${scryName}</span>` : ""}
+            <span>${metaLine}</span>
+            ${scryName ? `<span class="meta-scry">${scryName}</span>` : ""}
             ${warn}
           </div>
         </div>
@@ -1104,6 +1866,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         openBackdrop();
       });
     });
+    attachThumbFallbacks(grid);
   }
 
   
@@ -1125,7 +1888,8 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     try {
       const params = new URLSearchParams(qsStr || '');
       const setIf = (id, val) => { const el = document.getElementById(id); if (el && val !== null) el.value = val; };
-      setIf('hf-status',  params.get('status')   ?? 'all');
+      const statusVal = params.get('status');
+      setIf('hf-status',  (statusVal === 'flagged' ? 'review' : statusVal) ?? 'all');
       setIf('hf-scoremin',params.get('score_min')?? '');
       setIf('hf-since',   params.get('since')    ?? '');
       setIf('hf-q',       params.get('q')        ?? '');
@@ -1170,7 +1934,9 @@ if (!closeBtn._boundClose) {
   function bindHistoryOptionHandlers() {
     const passBtn = document.getElementById("histopt-pass");
     const failBtn = document.getElementById("histopt-fail");
+    const reviewBtn = document.getElementById("histopt-review");
     const editBtn = document.getElementById("histopt-edit");
+    const reproBtn= document.getElementById("histopt-reprocess");
     const delBtn  = document.getElementById("histopt-delete");
     const optClose= document.getElementById("histopt-close");
     const optModal= document.getElementById("history-options-modal");
@@ -1197,6 +1963,16 @@ if (!closeBtn._boundClose) {
       });
       failBtn._bound = true;
     }
+    if (reviewBtn && !reviewBtn._bound) {
+      reviewBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        fetch('/api/scan/'+histSelectedId+'/status', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({status:'review'})
+        }).then(()=>{ closeOpt(); fetchScans(); openHistoryModal(); });
+      });
+      reviewBtn._bound = true;
+    }
     if (!delBtn._bound) {
       delBtn.addEventListener("click", function(){
         if (!histSelectedId) return;
@@ -1206,21 +1982,39 @@ if (!closeBtn._boundClose) {
       delBtn._bound = true;
     }
     if (!editBtn._bound) {
-      editBtn.addEventListener("click", function(){
+      editBtn.addEventListener("click", async function(){
         if (!histSelectedId) return;
-        fetch('/api/scan/'+histSelectedId+'/load', {method:'POST'})
-          .then(r=>r.json())
-          .then((res)=>{
-            if (res && res.ok) {
-              currentLoadedId = histSelectedId;
-              document.getElementById("history-modal")?.classList.add("hidden");
-              // reuse existing Edit modal opener
-              //document.getElementById("btnEdit")?.click();
-              closeOpt();
-            }
-          });
+        if (openManualEditById(histSelectedId)) {
+          closeOpt();
+          document.getElementById("history-modal")?.classList.add("hidden");
+          return;
+        }
+        try {
+          const resp = await fetch(`/api/scan/${histSelectedId}/load`, {method:'POST'});
+          const res = await resp.json().catch(() => ({}));
+          if (!resp.ok || !res?.ok) {
+            alert(res?.error || "Unable to load this scan right now (scanner busy?).");
+            return;
+          }
+          currentLoadedId = histSelectedId;
+          document.getElementById("history-modal")?.classList.add("hidden");
+          closeOpt();
+          fetchState();
+          setTimeout(()=>openEditModal(), 80);
+        } catch (err) {
+          console.error("History load failed", err);
+        }
       });
       editBtn._bound = true;
+    }
+    if (reproBtn && !reproBtn._bound) {
+      reproBtn.addEventListener("click", function(){
+        if (!histSelectedId) return;
+        closeOpt();
+        document.getElementById("history-modal")?.classList.add("hidden");
+        openReprocessModalForScan(histSelectedId);
+      });
+      reproBtn._bound = true;
     }
     if (!optClose._bound) {
       optClose.addEventListener("click", closeOpt);
@@ -1285,18 +2079,19 @@ if (!closeBtn._boundClose) {
       });
   };
   if (eiApply) eiApply.onclick = function () {
-    if (!currentLoadedId) return;
+    const targetId = activeEditId || currentLoadedId;
+    if (!targetId) return;
     const payload = { name: eiName.value || "", number: eiNum.value || "", set: (eiSet.value || "").toLowerCase(), scry_id: chosenScryId || null };
-    fetch("/api/scan/" + currentLoadedId + "/edit", {
+    fetch("/api/scan/" + targetId + "/edit", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
     })
     .then(r => r.json())
     .then(res => {
       if (res && res.ok) {
-        const cmp = document.getElementById("cmpimg");
-        if (cmp) cmp.src = "/compare.jpg?ts=" + Date.now();
+        refreshCompare(Date.now());
         fetchState();
         fetchScans();
+        activeEditId = null;
         closeEditModal();
       }
     });
@@ -1395,11 +2190,11 @@ document.getElementById('export-go')?.addEventListener('click', ()=>{
 
   // ---------- boot ----------
   function boot() {
+    loadManualCrop();
     fetchState();
     fetchScans();
-    setInterval(fetchState, 800);
-    setInterval(fetchScans, 1500);
-      setInterval(fetchLogs, 700); 
+    setInterval(fetchState, 300);
+    setInterval(fetchScans, 900);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
@@ -1690,3 +2485,15 @@ document.getElementById('btnMeasureDeck')?.addEventListener('click', async () =>
   document.getElementById('printer-estop')?.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); doEstop(); });
   if (!window.estop) { window.estop = doEstop; }
 })();
+  async function pollReprocessJob(jobId, onUpdate) {
+    if (!jobId) throw new Error("job missing");
+    while (true) {
+      const res = await fetch(`/api/reprocess/job/${jobId}?ts=${Date.now()}`);
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || "Job lookup failed");
+      onUpdate?.(data);
+      if (data.status === "done") return data;
+      if (data.status === "error") throw new Error(data.error || "Job failed");
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
