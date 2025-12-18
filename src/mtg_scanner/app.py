@@ -33,7 +33,7 @@ if REPO:
     check_for_update_async(REPO, get_current_version(), on_result=_on_update)
 
 try:
-    import os, json, re, threading, time, signal, io, base64, shutil, glob, difflib, uuid
+    import os, json, re, threading, time, signal, io, base64, shutil, glob, difflib, uuid, tarfile, tempfile, random
     from collections import OrderedDict, deque
     from contextlib import contextmanager
     from werkzeug.serving import make_server, WSGIRequestHandler
@@ -249,7 +249,7 @@ except NameError:
 _LOG_READY = False                         # flip after full init
 
 _SUCCESS_TOKENS = ("SUCCESS", "IMPORTED", "IMPORT", "LOADED", "CONNECTED", "READY", "SCAN_OK", "ONLINE", "ATTACHED", "ENABLED", "AVAILABLE")
-_ERROR_TOKENS   = ("ERROR", "EXCEPTION", "TRACEBACK", "CRITICAL", "FAIL")
+_ERROR_TOKENS   = ("ERROR", "EXCEPTION", "TRACEBACK", "CRITICAL", "FAIL", "REFUSED", "DENIED", "UNAVAILABLE", "TIMEOUT", "NOT READY", "DISCONNECT")
 _WARN_TOKENS    = ("WARN", "WARNING", "DEPRECATED", "RETRY")
 
 # ANSI palette (simple; cross-platform terminals handle these now)
@@ -298,12 +298,16 @@ def _normalize_level(tag: str, msg: str, level_hint) -> int:
 def _infer_severity(tag: str, msg: str, level: int = None) -> str:
     lvl = _normalize_level(tag, msg, level if level is not None else DBG_INFO)
     txt = f"{tag or ''} {msg or ''}".upper()
-    if any(t in txt for t in _SUCCESS_TOKENS):
-        return "ok"
-    if lvl <= DBG_ERROR:
+    has_err = any(t in txt for t in _ERROR_TOKENS)
+    has_warn = any(t in txt for t in _WARN_TOKENS)
+    has_ok = any(t in txt for t in _SUCCESS_TOKENS)
+
+    if lvl <= DBG_ERROR or has_err:
         return "err"
-    if lvl == DBG_WARN:
+    if lvl == DBG_WARN or has_warn:
         return "warn"
+    if has_ok:
+        return "ok"
     if lvl >= DBG_DEBUG:
         return "debug"
     return "info"
@@ -768,6 +772,7 @@ stack_state = {
     "thickness": float(globals().get("CARD_THICKNESS_MM", 0.305)),
     "remeasure_every": int(globals().get("REMEASURE_EVERY", 0) or 0),
 }
+STACK_PROBE_PER_PICK = True  # BLTouch probes each pickup; skip height guesses between probes
 
 # Give UI something sane on first /api/state call
 scanner_state = {
@@ -842,6 +847,18 @@ def _update_stack_config(thickness=None, remeasure_every=None):
         if thickness is not None:
             try:
                 new_thick = float(thickness)
+                cur_thick = float(stack_state.get("thickness") or new_thick)
+                # Guard against noisy remeasurements that swing thickness wildly.
+                if cur_thick > 0:
+                    max_delta = 0.12 * cur_thick  # cap change to ±12%
+                    delta = new_thick - cur_thick
+                    if abs(delta) > max_delta:
+                        clamped = cur_thick + (max_delta if delta > 0 else -max_delta)
+                        try:
+                            _dbg("STACKS", f"thickness jump clamped {cur_thick:.4f}->{new_thick:.4f} -> {clamped:.4f}")
+                        except Exception:
+                            pass
+                        new_thick = clamped
                 stack_state["thickness"] = new_thick
                 # Recompute remaining cards with the updated thickness if heights are known.
                 for idx, h in enumerate(stack_state.get("current_height", [])):
@@ -860,12 +877,66 @@ def _update_stack_config(thickness=None, remeasure_every=None):
                 pass
         if remeasure_every is not None:
             try:
-                stack_state["remeasure_every"] = int(max(0, remeasure_every))
+                if STACK_PROBE_PER_PICK:
+                    stack_state["remeasure_every"] = 0
+                else:
+                    stack_state["remeasure_every"] = int(max(0, remeasure_every))
             except Exception:
                 pass
 
 def _update_stack_state(h1=None, h2=None, start1=None, start2=None, count1=None, count2=None, source=None):
     """Update stack height + card estimates and bump remeasure counters."""
+    probe_each_pick = bool(globals().get("STACK_PROBE_PER_PICK", False))
+    if probe_each_pick:
+        now = time.time()
+        with printer_lock:
+            for key in ("start_height", "current_height", "start_cards", "remaining_cards", "processed"):
+                if not isinstance(stack_state.get(key), list):
+                    stack_state[key] = list(stack_state.get(key, []))
+                while len(stack_state[key]) < 2:
+                    stack_state[key].append(None)
+            updated_local = False
+            if start1 is not None:
+                stack_state["start_height"][0] = float(start1)
+                stack_state["current_height"][0] = float(start1)
+                stack_state["processed"][0] = 0
+                stack_state["start_cards"][0] = None
+                stack_state["remaining_cards"][0] = None
+                updated_local = True
+            if start2 is not None:
+                stack_state["start_height"][1] = float(start2)
+                stack_state["current_height"][1] = float(start2)
+                stack_state["processed"][1] = 0
+                stack_state["start_cards"][1] = None
+                stack_state["remaining_cards"][1] = None
+                updated_local = True
+            if h1 is not None:
+                stack_state["current_height"][0] = float(h1)
+                if stack_state["start_height"][0] is None:
+                    stack_state["start_height"][0] = float(h1)
+                updated_local = True
+            if h2 is not None:
+                stack_state["current_height"][1] = float(h2)
+                if stack_state["start_height"][1] is None:
+                    stack_state["start_height"][1] = float(h2)
+                updated_local = True
+            if count1 is not None:
+                try:
+                    stack_state["remaining_cards"][0] = max(0, int(count1))
+                    updated_local = True
+                except Exception:
+                    pass
+            if count2 is not None:
+                try:
+                    stack_state["remaining_cards"][1] = max(0, int(count2))
+                    updated_local = True
+                except Exception:
+                    pass
+            if updated_local:
+                stack_state["last_remeasure_at"] = now
+                stack_state["last_source"] = source or "gcode"
+        return
+
     now = time.time()
     updated = False
     with printer_lock:
@@ -907,6 +978,14 @@ def _update_stack_state(h1=None, h2=None, start1=None, start2=None, count1=None,
             refs = stack_state.get("current_height") or [None, None]
             if refs[0] is None or refs[1] is None:
                 refs = stack_state.get("start_height") or [None, None]
+            # If both stacks already have distinct baselines, trust the paired readings
+            # even when they are numerically equal. This avoids throwing away a real
+            # update to stack 1 when both probes coincidentally report the same height.
+            try:
+                if refs[0] is not None and refs[1] is not None and abs(refs[0] - refs[1]) > tol_mm * 0.5:
+                    return v1, v2
+            except Exception:
+                pass
             if refs[0] is None or refs[1] is None:
                 return v1, v2
             d0 = abs(v1 - refs[0]); d1 = abs(v1 - refs[1])
@@ -929,7 +1008,6 @@ def _update_stack_state(h1=None, h2=None, start1=None, start2=None, count1=None,
             If both new heights are the same AND both stacks currently read the same,
             avoid overwriting both by defaulting the update to stack 0 only.
             """
-            orig = (v1, v2)
             if v1 is None or v2 is None:
                 return v1, v2
             if abs(v1 - v2) > tol_mm * 0.25:
@@ -939,13 +1017,9 @@ def _update_stack_state(h1=None, h2=None, start1=None, start2=None, count1=None,
                 refs = stack_state.get("start_height") or [None, None]
             if refs[0] is None or refs[1] is None:
                 return v1, v2
-            if abs(refs[0] - refs[1]) <= tol_mm * 0.25:
-                try: _dbg("STACK MAP", f"ambig_same_height -> keep stack0 {v1} drop stack1 (refs={refs})")
-                except Exception: pass
-                return v1, None
-            if orig != (v1, v2):
-                try: _dbg("STACK MAP", f"ambig_same_height unchanged orig={orig} refs={refs}")
-                except Exception: pass
+            # When both stacks truly read the same height, update both rather than dropping one.
+            # Only drop a duplicate when the readings are identical AND we already know the stacks
+            # are significantly different (handled in _dedupe_identical).
             return v1, v2
 
         def _maybe_swap_for_best_match(v1, v2):
@@ -1185,13 +1259,66 @@ def _stack_cards_processed(n=1, stack_idx=0):
     if n <= 0:
         return
     with printer_lock:
+        # Decide which stack to debit. If both stacks are configured, alternate
+        # between them to match the sorter’s staggered feed; otherwise use the
+        # requested index (default stack 0).
+        idx = int(stack_idx or 0)
+        try:
+            both_known = all(
+                isinstance(v, (int, float))
+                for v in stack_state.get("start_height", [None, None])[:2]
+            )
+            if both_known:
+                idx = int(stack_state.get("next_stack", idx) or 0) % 2
+                stack_state["next_stack"] = 1 - idx
+        except Exception:
+            pass
+
         proc = stack_state.get("processed", [0, 0])
         if not isinstance(proc, list):
             proc = [0, 0]
         while len(proc) < 2:
             proc.append(0)
-        proc[stack_idx] = int(proc[stack_idx] or 0) + n
+        proc[idx] = int(proc[idx] or 0) + n
         stack_state["processed"] = proc
+
+        for key in ("start_cards", "start_height", "current_height", "remaining_cards"):
+            if not isinstance(stack_state.get(key), list):
+                stack_state[key] = list(stack_state.get(key, []))
+            while len(stack_state[key]) < 2:
+                stack_state[key].append(None)
+
+        if STACK_PROBE_PER_PICK:
+            return
+
+        # Keep the live estimate in sync even before the next re-measure.
+        try:
+            thick = float(stack_state.get("thickness") or globals().get("CARD_THICKNESS_MM", 0.305) or 0.305)
+        except Exception:
+            thick = 0.305
+
+        sc = stack_state["start_cards"]
+        sh = stack_state["start_height"]
+        ch = stack_state["current_height"]
+        rc = stack_state["remaining_cards"]
+        try:
+            if sc[idx] is None and sh[idx] is not None:
+                sc[idx] = _stack_cards_from_height(sh[idx], thick)
+        except Exception:
+            pass
+
+        try:
+            cur_proc = proc[idx]
+            if sc[idx] is not None:
+                rc[idx] = max(0, int(round(sc[idx] - cur_proc)))
+            if sh[idx] is not None:
+                est_h = float(sh[idx]) - float(cur_proc) * thick
+                est_h = max(0.0, est_h)
+                prev_h = ch[idx]
+                if prev_h is None or est_h <= prev_h:
+                    ch[idx] = est_h
+        except Exception:
+            pass
 
 @app.post("/api/stacks/measure")
 def api_stacks_measure():
@@ -1210,7 +1337,7 @@ SCRYFALL_CARD_NAMES_LOWER = set()
 SCRYFALL_SET_CODES = set()
 
 # Where to save exported decklists (on the device running this app)
-EXPORT_DIR = globals().get("EXPORT_DIR", "./exports")
+EXPORT_DIR = os.path.abspath(globals().get("EXPORT_DIR", "./exports"))
 
 # --- Autoscan timing defaults (safe fallbacks if not provided via config) ---
 try:
@@ -1449,6 +1576,180 @@ def _quarantine_history(meta_path, sid=None, reason="parse_error"):
     except Exception as e:
         _dbg("HISTORY ERROR", f"quarantine failed {meta_path}: {e}")
 
+def _quarantine_paths_for_sid(sid):
+    base = os.path.join(HISTORY_BAD_DIR, str(sid))
+    meta = glob.glob(base + ".json*")
+    snap = glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_snap.jpg*"))
+    thmb = glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_thumb.jpg*"))
+    cmp = glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_cmp.jpg*"))
+    def _first(lst): return lst[0] if lst else None
+    return _first(meta), _first(snap), _first(thmb), _first(cmp)
+
+def _parse_quarantine_meta(meta_path):
+    if not meta_path or not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        pass
+    try:
+        text = open(meta_path, "r", errors="ignore").read()
+    except Exception:
+        return None
+    try:
+        cleaned = text.replace("NaN", "null").replace("Infinity", "null").replace("-Infinity", "null")
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    try:
+        relaxed = re.sub(r'([a-zA-Z0-9_]+)\s*:', lambda m: f"\"{m.group(1)}\":", text)
+        return json.loads(relaxed)
+    except Exception:
+        pass
+    try:
+        import ast
+        return ast.literal_eval(text)
+    except Exception:
+        return None
+    return None
+
+def _json_safe_any(val):
+    try:
+        import numpy as _np
+    except Exception:
+        _np = None
+    if _np is not None and isinstance(val, _np.ndarray):
+        if val.size > 50000:
+            return None
+        return val.tolist()
+    if _np is not None and isinstance(val, _np.generic):
+        try:
+            return val.item()
+        except Exception:
+            pass
+    if isinstance(val, bytes):
+        return None
+    if isinstance(val, dict):
+        return {k: _json_safe_any(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [_json_safe_any(v) for v in val]
+    if isinstance(val, str) and len(val) > 1_000_000:
+        return val[:1_000_000]
+    return val
+
+def _sanitize_restored_entry(meta, sid, snap_b=None, thmb_b=None, cmp_b=None):
+    """Build a safe entry dict from parsed meta + optional images."""
+    m = meta or {}
+    entry = {
+        "id": sid,
+        "ts": float(m.get("ts", time.time())),
+        "name": m.get("name", ""),
+        "name_conf": float(m.get("name_conf", 0.0)),
+        "number_raw": m.get("number_raw") or m.get("number") or "",
+        "number": _parse_collector_for_display(m.get("number_raw") or m.get("number") or ""),
+        "number_conf": float(m.get("number_conf", 0.0)),
+        "set_hint": (m.get("set_hint") or "").strip().lower(),
+        "foil": bool(m.get("foil", False)),
+        "foil_score": float(m.get("foil_score", 0.0)),
+        "scry": m.get("scry") or {},
+        "match_score": round(float(m.get("match_score", 0.0)), 3),
+        "match_ok": bool(m.get("match_ok")) if m.get("match_ok") is not None else None,
+        "flagged": bool(m.get("flagged", False)),
+        "status": (m.get("status") or "").lower() or ("pass" if bool(m.get("match_ok")) else "fail"),
+        "review_reasons": list(m.get("review_reasons") or []),
+        "review_level": m.get("review_level"),
+        "auto_name_fix": bool(m.get("auto_name_fix", False)),
+        "inputs_present": dict(m.get("inputs_present") or {}),
+        "snap_jpg": snap_b or (base64.b64decode(m.get("snap_jpg")) if isinstance(m.get("snap_jpg"), str) else b""),
+        "thumb": thmb_b or (base64.b64decode(m.get("thumb")) if isinstance(m.get("thumb"), str) else b""),
+        "cmp_jpg": cmp_b or (base64.b64decode(m.get("cmp_jpg")) if isinstance(m.get("cmp_jpg"), str) else b""),
+        "cmp_stats": _cmp_stats_sanitized(m.get("cmp_stats") or {}),
+    }
+    if not entry["thumb"] and entry["snap_jpg"]:
+        try:
+            import cv2
+            snap = _decode_jpg(entry["snap_jpg"])
+            entry["thumb"] = _make_thumb(snap)
+        except Exception:
+            entry["thumb"] = b""
+    # If we rebuilt bytes from disk, drop heavy blobs from memory (keep thumb).
+    if snap_b or cmp_b:
+        entry["snap_jpg"] = b""
+        entry["cmp_jpg"] = b""
+    if entry["status"] not in ("pass", "fail", "review"):
+        entry["status"] = "pass" if entry["match_ok"] else "fail"
+    if entry["status"] == "pass":
+        entry["flagged"] = False
+    return entry
+
+def _quarantine_cleanup_files(sid):
+    for path in glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}*")):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+def _restore_quarantine_entry(sid, meta_override=None):
+    sid = int(sid)
+    meta_p, snap_p, thmb_p, cmp_p = _quarantine_paths_for_sid(sid)
+    meta_data = meta_override if meta_override is not None else _parse_quarantine_meta(meta_p)
+    entry = _sanitize_restored_entry(
+        meta_data or {},
+        sid,
+        snap_b=_load_image(snap_p),
+        thmb_b=_load_image(thmb_p),
+        cmp_b=_load_image(cmp_p),
+    )
+    with history_lock:
+        scan_history[:] = [e for e in scan_history if e.get("id") != sid]
+        scan_history.insert(0, entry)
+        _persist_entry_to_disk(entry)
+    _quarantine_cleanup_files(sid)
+    return _summarize_entry_for_modal(entry)
+
+def _list_quarantined_entries():
+    items = []
+    try:
+        os.makedirs(HISTORY_BAD_DIR, exist_ok=True)
+    except Exception:
+        pass
+    for meta in glob.glob(os.path.join(HISTORY_BAD_DIR, "*.json*")):
+        base = os.path.basename(meta)
+        parts = base.split(".")
+        sid = None
+        try:
+            sid = int(parts[0])
+        except Exception:
+            continue
+        reason = ".".join(parts[1:]) if len(parts) > 1 else "unknown"
+        parsed = _parse_quarantine_meta(meta)
+        preview = parsed if isinstance(parsed, dict) else {}
+        has_snap = bool(glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_snap.jpg*")))
+        has_thmb = bool(glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_thumb.jpg*")))
+        has_cmp = bool(glob.glob(os.path.join(HISTORY_BAD_DIR, f"{sid}_cmp.jpg*")))
+        items.append({
+            "id": sid,
+            "reason": reason,
+            "meta_path": meta,
+            "has_snap": has_snap,
+            "has_thumb": has_thmb,
+            "has_cmp": has_cmp,
+            "meta": _json_safe_any({
+                "name": preview.get("name"),
+                "set_hint": preview.get("set_hint"),
+                "number": preview.get("number") or preview.get("number_raw"),
+                "status": preview.get("status"),
+                "match_score": preview.get("match_score"),
+                "flagged": preview.get("flagged"),
+                "ts": preview.get("ts"),
+                "review_reasons": preview.get("review_reasons"),
+            }) if preview else None,
+            "parse_ok": bool(preview),
+        })
+    items.sort(key=lambda x: x.get("id", 0), reverse=True)
+    return items
+
 def _jpeg_bytes(bgr, q=80):
     if bgr is None or getattr(bgr, "size", 0) == 0:
         return b""
@@ -1460,6 +1761,20 @@ def _decode_jpg(bts):
         return None
     data = np.frombuffer(bts, np.uint8)
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+def _reencode_jpg_bytes(data: bytes, quality: int = 80):
+    """Down-encode JPEG bytes to reduce size; fall back to original on failure."""
+    try:
+        if not data:
+            return b""
+        img = _decode_jpg(data)
+        if img is None:
+            return data
+        q = max(40, min(int(quality), 95))
+        new_bytes = _jpeg_bytes(img, q)
+        return new_bytes if new_bytes else data
+    except Exception:
+        return data
 
 def _make_thumb(bgr, w=140):
     if bgr is None or getattr(bgr, "size", 0) == 0:
@@ -1478,6 +1793,15 @@ def _entry_paths(sid: int):
     cmp  = os.path.join(HISTORY_IMG_DIR, f"{sid}_cmp.jpg")
     return meta, snap, thmb, cmp
 
+def _generate_new_scan_id(existing_ids=None):
+    ids = set(int(i) for i in (existing_ids or []) if i is not None)
+    for _ in range(10000):
+        cand = int(time.time() * 1000) + random.randint(0, 9999)
+        if cand not in ids:
+            return cand
+    # As a last resort, pick a uuid-based int
+    return int(uuid.uuid4().int & 0x7FFFFFFF)
+
 def _save_image(path, bts):
     if not bts:
         return
@@ -1494,6 +1818,24 @@ def _load_image(path):
     except Exception:
         return b""
 
+def _ensure_entry_images(entry):
+    """Lazy-load snapshot/thumb/cmp from disk if missing in memory."""
+    if not entry or not entry.get("id"):
+        return entry
+    need_snap = not entry.get("snap_jpg")
+    need_thumb = not entry.get("thumb")
+    need_cmp = not entry.get("cmp_jpg")
+    if not (need_snap or need_thumb or need_cmp):
+        return entry
+    _, snap_p, thmb_p, cmp_p = _entry_paths(int(entry["id"]))
+    if need_snap:
+        entry["snap_jpg"] = _load_image(snap_p)
+    if need_thumb:
+        entry["thumb"] = _load_image(thmb_p)
+    if need_cmp:
+        entry["cmp_jpg"] = _load_image(cmp_p)
+    return entry
+
 def _cmp_stats_sanitized(src):
     out = {}
     for k, v in (src or {}).items():
@@ -1506,16 +1848,71 @@ def _cmp_stats_sanitized(src):
 
 def _persist_entry_to_disk(entry: dict):
     """Write per-scan JSON + images. Excludes raw bytes from JSON."""
+    def _json_safe(val):
+        try:
+            import numpy as _np
+        except Exception:
+            _np = None
+        if _np is not None and isinstance(val, _np.ndarray):
+            # Drop huge arrays; keep only small metadata-sized ndarrays.
+            if val.size > 50000:
+                return None
+            return val.tolist()
+        if _np is not None and isinstance(val, _np.generic):
+            try:
+                return val.item()
+            except Exception:
+                pass
+        if isinstance(val, bytes):
+            # Skip raw bytes to avoid giant JSON blobs.
+            return None
+        if isinstance(val, dict):
+            return {k: _json_safe(v) for k, v in val.items()}
+        if isinstance(val, (list, tuple, set)):
+            return [_json_safe(v) for v in val]
+        if isinstance(val, str) and len(val) > 1_000_000:
+            return val[:1_000_000]
+        return val
+
     meta_path, snap_path, thmb_path, cmp_path = _entry_paths(entry["id"])
-    meta = {k: v for k, v in entry.items() if k not in ("snap_jpg", "thumb", "cmp_jpg")}
+    # Drop large or non-serializable blobs from the JSON payload.
+    meta = {
+        k: v for k, v in entry.items()
+        if k not in ("snap_jpg", "thumb", "cmp_jpg", "cmp_details", "cmp_debug", "cmp_debug_images")
+    }
+    meta_safe = _json_safe(meta)
     try:
         with open(meta_path, "w") as f:
-            json.dump(meta, f)
+            json.dump(meta_safe, f)
     except Exception as e:
         _dbg("HISTORY ERROR", f"save meta failed {meta_path}: {e}")
+        # Fallback to minimal fields to keep entry usable.
+        minimal = {
+            "id": entry.get("id"),
+            "ts": entry.get("ts"),
+            "name": entry.get("name"),
+            "number": entry.get("number"),
+            "set_hint": entry.get("set_hint"),
+            "status": entry.get("status"),
+            "match_score": entry.get("match_score"),
+            "match_ok": entry.get("match_ok"),
+            "flagged": entry.get("flagged"),
+        }
+        try:
+            with open(meta_path, "w") as f:
+                json.dump(minimal, f)
+        except Exception as e2:
+            _dbg("HISTORY ERROR", f"fallback save failed {meta_path}: {e2}")
+            try:
+                _quarantine_history(meta_path, sid=entry.get("id"), reason="savefail")
+            except Exception:
+                pass
     _save_image(snap_path, entry.get("snap_jpg", b""))
     _save_image(thmb_path, entry.get("thumb", b""))
     _save_image(cmp_path,  entry.get("cmp_jpg", b""))
+    # Drop heavyweight blobs from in-memory copy to limit RAM (keep thumb for fast UI).
+    entry["snap_jpg"] = b""
+    entry["cmp_jpg"] = b""
 
 def _delete_entry_from_disk(sid: int):
     meta, snap, thmb, cmp = _entry_paths(sid)
@@ -1526,6 +1923,24 @@ def _delete_entry_from_disk(sid: int):
         except Exception as e:
             _dbg("HISTORY ERROR", f"delete failed {p}: {e}")
 
+def _wipe_history_from_disk():
+    """Remove all persisted history files (json + images). Keeps quarantine folder."""
+    patterns = [
+        os.path.join(HISTORY_DIR, f"*{HISTORY_JSON_EXT}"),
+        os.path.join(HISTORY_IMG_DIR, "*_snap.jpg"),
+        os.path.join(HISTORY_IMG_DIR, "*_thumb.jpg"),
+        os.path.join(HISTORY_IMG_DIR, "*_cmp.jpg"),
+        os.path.join(HISTORY_IMG_DIR, "*.jpg"),
+    ]
+    for pat in patterns:
+        for p in glob.glob(pat):
+            try:
+                if os.path.isdir(p):
+                    continue
+                os.remove(p)
+            except Exception as e:
+                _dbg("HISTORY ERROR", f"wipe failed {p}: {e}")
+
 def _load_history_from_disk():
     """Load all *.json entries from HISTORY_DIR, newest-first."""
     items = []
@@ -1535,9 +1950,10 @@ def _load_history_from_disk():
                 e = json.load(f)
             sid = int(e.get("id"))
             _, snap_p, thmb_p, cmp_p = _entry_paths(sid)
-            e["snap_jpg"] = _load_image(snap_p)
+            # Keep only the small thumb in memory; lazy-load others on demand.
+            e["snap_jpg"] = b""
             e["thumb"]    = _load_image(thmb_p)
-            e["cmp_jpg"]  = _load_image(cmp_p)
+            e["cmp_jpg"]  = b""
             items.append(e)
         except Exception as e:
             _dbg("HISTORY ERROR", f"load meta failed {meta}: {e}")
@@ -1586,6 +2002,44 @@ def _aggregate_history(only_status: str = "pass"):
         key = (nm, set_code, cn)
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+def _aggregate_rows(rows, only_status: str = "all"):
+    """
+    Aggregate an explicit list of rows instead of the global scan_history.
+    Mirrors _aggregate_history's status handling.
+    """
+    counts = {}
+    for e in rows:
+        st = (e.get("status") or "fail").lower()
+        if only_status == "pass":
+            if st != "pass":
+                continue
+            if bool(e.get("flagged")):
+                continue
+        elif only_status == "pass_no_review":
+            if st != "pass":
+                continue
+            if bool(e.get("flagged")) or (st == "review"):
+                continue
+        elif only_status == "review":
+            if st != "review":
+                continue
+        elif only_status == "fail":
+            if st != "fail":
+                continue
+        nm, set_code, cn = _canon_from_entry(e)
+        if not nm:
+            continue
+        key = (nm, set_code, cn)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+def _decklist_from_rows(rows, only_status: str = "all"):
+    counts = _aggregate_rows(rows, only_status=only_status)
+    lines = []
+    for (name, set_code, cn), c in sorted(counts.items(), key=lambda x: (x[0][0].lower(), x[0][1], x[0][2])):
+        lines.append(_deckline(name, c, set_code, cn, fmt="simple"))
+    return "\n".join(lines) + ("\n" if lines else "")
 
 def _deckline(name: str, count: int, set_code: str, cn: str, fmt: str):
     """Archidekt/Moxfield both accept: 'N Name (SET) CN' or just 'N Name'."""
@@ -3405,11 +3859,29 @@ def _read_collector_number(img, foil: bool = False):
             _dbg("OCR NUM", "Collector number OCR produced no tokens")
     return best_tok, best_conf
 
+# OCR helpers sometimes return numpy arrays or lists; normalize to a plain string.
+def _coerce_text(val) -> str:
+    try:
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                return ""
+            if val.ndim == 0:
+                return str(val.item())
+            return " ".join(str(x) for x in val.flatten() if str(x))
+        if isinstance(val, (list, tuple)):
+            parts = [str(x) for x in val if x is not None and str(x)]
+            return " ".join(parts)
+        return "" if val is None else str(val)
+    except Exception:
+        try:
+            return str(val)
+        except Exception:
+            return ""
 
 def _parse_collector_for_display(raw: str) -> str:
-    if not raw:
+    s = _coerce_text(raw).strip()
+    if not s:
         return ""
-    s = str(raw).strip()
     m = re.search(r'(\d{1,4})\s*/\s*(\d{1,4})', s)
     if m:
         return f"{int(m.group(1))}/{int(m.group(2))}"
@@ -3418,9 +3890,9 @@ def _parse_collector_for_display(raw: str) -> str:
     return str(max(nums)) if nums else ""
 
 def _normalize_cn_for_search(raw: str) -> str:
-    if not raw:
+    s = _coerce_text(raw).strip()
+    if not s:
         return ""
-    s = str(raw).strip()
     m = re.search(r'(\d{1,4})\s*/\s*(\d{1,4})', s)
     if m:
         return str(int(m.group(1)))
@@ -3432,8 +3904,9 @@ def _norm_name_for_match(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower()).strip()
 
 def _maybe_correct_ocr_name(text: str, conf: float) -> str:
+    text = _coerce_text(text)
     if not text:
-        return text
+        return ""
     original = text.strip()
     tl = original.lower()
     if tl in SCRYFALL_CARD_NAMES_LOWER:
@@ -4886,6 +5359,12 @@ def _fetch_scry_image(card_obj):
     if cached is not None:
         return cached
 
+    # Network timeout guard so a slow image fetch can't stall OCR
+    try:
+        img_timeout = float(globals().get("SCRY_IMG_TIMEOUT", SCRYFALL_TIMEOUT))
+    except Exception:
+        img_timeout = SCRYFALL_TIMEOUT
+
     # Disk cache next
     disk_path = _scry_img_disk_path(card_obj)
     if disk_path and os.path.exists(disk_path):
@@ -4913,7 +5392,7 @@ def _fetch_scry_image(card_obj):
 
     # Download and persist
     try:
-        r = _HTTP.get(url, timeout=SCRYFALL_TIMEOUT)
+        r = _HTTP.get(url, timeout=img_timeout)
         if r.status_code == 200:
             data = np.frombuffer(r.content, np.uint8)
             bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -6792,6 +7271,7 @@ def _refresh_timed_out_entry(seq, snap_img, ocr_res):
     cn_raw = (ocr_res.get("number_raw") or ocr_res.get("number") or "").strip()
     shint = (ocr_res.get("set_hint") or "").strip().lower()
     nm_conf = float(ocr_res.get("name_conf") or 0.0)
+    skip_compare = bool(entry.get("timed_out"))
 
     choice = None
     with cardinfo_lock:
@@ -6809,22 +7289,24 @@ def _refresh_timed_out_entry(seq, snap_img, ocr_res):
     except Exception:
         pass
 
-    scry_img = _fetch_scry_image(choice) if choice is not None else None
+    scry_img = None
     match_score, match_ok, cmp_details, cmp_jpg = 0.0, False, None, None
-    if scry_img is not None:
-        try:
-            match_score, match_ok = compare_snapshot_to_scryfall(
-                snap_img, scry_img, return_details=False, scry_card=choice
-            )
-            _, _, cmp_details = compare_snapshot_to_scryfall(
-                snap_img, scry_img, return_details=True, scry_card=choice
-            )
-            if cmp_details:
-                _publish_compare_visual(cmp_details)
-                vis = _render_compare_visual(cmp_details)
-                cmp_jpg = _jpeg_bytes(vis, JPEG_QUALITY_CMP) if vis is not None else None
-        except Exception:
-            pass
+    if not skip_compare and choice is not None:
+        scry_img = _fetch_scry_image(choice)
+        if scry_img is not None:
+            try:
+                match_score, match_ok = compare_snapshot_to_scryfall(
+                    snap_img, scry_img, return_details=False, scry_card=choice
+                )
+                _, _, cmp_details = compare_snapshot_to_scryfall(
+                    snap_img, scry_img, return_details=True, scry_card=choice
+                )
+                if cmp_details:
+                    _publish_compare_visual(cmp_details)
+                    vis = _render_compare_visual(cmp_details)
+                    cmp_jpg = _jpeg_bytes(vis, JPEG_QUALITY_CMP) if vis is not None else None
+            except Exception:
+                pass
 
     decision = _derive_review_outcome(
         ocr_res,
@@ -7217,7 +7699,8 @@ def api_bad():
 def _post_job_cleanup(job=None):
     """Reset state so the scanner is ready for the next job cycle."""
     try:
-        # Treat each completed job as one card processed from stack 1 (input).
+        # Each completed job counts as one card pulled; _stack_cards_processed
+        # will round-robin when both stacks are known.
         _stack_cards_processed(1, 0)
         with printer_lock:
             cur = printer_state.get('job_id')
@@ -7311,6 +7794,105 @@ def capture_scanned_card_from_live(force_manual: bool = False):
     return True
 
 from flask import send_from_directory
+
+def _tar_add_bytes(tar_obj, arcname, data: bytes):
+    if not data:
+        return
+    ti = tarfile.TarInfo(arcname)
+    ti.size = len(data)
+    ti.mtime = time.time()
+    tar_obj.addfile(ti, io.BytesIO(data))
+
+def _history_export_to_tar(compact_images: bool = False, decklist_status: str = "all"):
+    """Bundle full history (meta + images) into a tar.gz and include a decklist."""
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    _ensure_history_dirs()
+
+    with history_lock:
+        rows = [dict(e) for e in scan_history]
+
+    if not rows:
+        return None, None, 0
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    fname = f"history_backup_{ts}.tar.gz"
+    fpath = os.path.join(EXPORT_DIR, fname)
+
+    deck_text = _decklist_from_rows(rows, only_status=decklist_status or "all")
+    manifest_entries = []
+
+    try:
+        with tarfile.open(fpath, "w:gz") as tf:
+            # add meta + images
+            for e in rows:
+                sid = int(e.get("id") or 0)
+                if not sid:
+                    continue
+                meta_p, snap_p, thmb_p, cmp_p = _entry_paths(sid)
+                meta_rel = f"history/{sid}.json"
+                snap_rel = f"imgs/{sid}_snap.jpg"
+                thumb_rel = f"imgs/{sid}_thumb.jpg"
+                cmp_rel = f"imgs/{sid}_cmp.jpg"
+                has_meta = os.path.exists(meta_p)
+                has_snap = os.path.exists(snap_p)
+                has_thmb = os.path.exists(thmb_p)
+                has_cmp = os.path.exists(cmp_p)
+
+                if has_meta:
+                    tf.add(meta_p, arcname=meta_rel)
+                if has_snap:
+                    data = _load_image(snap_p)
+                    if compact_images:
+                        data = _reencode_jpg_bytes(data, quality=max(60, min(JPEG_QUALITY_SNAP, 85)))
+                    _tar_add_bytes(tf, snap_rel, data)
+                if has_thmb:
+                    data = _load_image(thmb_p)
+                    if compact_images:
+                        data = _reencode_jpg_bytes(data, quality=max(60, min(JPEG_QUALITY_THUMB, 80)))
+                    _tar_add_bytes(tf, thumb_rel, data)
+                if has_cmp:
+                    data = _load_image(cmp_p)
+                    if compact_images:
+                        data = _reencode_jpg_bytes(data, quality=max(60, min(JPEG_QUALITY_CMP, 85)))
+                    _tar_add_bytes(tf, cmp_rel, data)
+
+                manifest_entries.append({
+                    "id": sid,
+                    "meta": meta_rel if has_meta else None,
+                    "snap": snap_rel if has_snap else None,
+                    "thumb": thumb_rel if has_thmb else None,
+                    "cmp": cmp_rel if has_cmp else None,
+                })
+
+            # decklist (all cards)
+            _tar_add_bytes(tf, "decklist.txt", deck_text.encode("utf-8"))
+
+            manifest = {
+                "version": APP_VERSION,
+                "exported_at": time.time(),
+                "count": len(rows),
+                "compact_images": bool(compact_images),
+                "decklist_status": decklist_status or "all",
+                "entries": manifest_entries,
+            }
+            _tar_add_bytes(tf, "manifest.json", json.dumps(manifest, indent=2).encode("utf-8"))
+    except Exception as e:
+        try:
+            if os.path.exists(fpath):
+                os.remove(fpath)
+        except Exception:
+            pass
+        raise e
+
+    return fname, fpath, len(rows)
+
+def _safe_extract_tar(tar_obj, dest):
+    dest = os.path.abspath(dest)
+    for member in tar_obj.getmembers():
+        member_path = os.path.abspath(os.path.join(dest, member.name))
+        if not member_path.startswith(dest):
+            raise ValueError("unsafe path in archive")
+    tar_obj.extractall(dest)
 
 @app.post("/api/scans/export")
 def api_scans_export():
@@ -7414,25 +7996,35 @@ def api_scans_export_download():
     # ----- CSV (Selectable fields) -----
     if fmt == "csv":
         import csv, io
+        CARDSPHERE_IMPORT_FIELDS = ["Name","Set","Quantity","Foil","Condition","Language"]
 
         # Map incoming aliases -> canonical Archidekt-style headers (order preserved)
         _aliases = {
             # common synonyms
             "Card Name": "Name",
-            "Set": "Edition Code",
+            "Set": "Set",
             "Edition": "Edition Code",
             "Set Code": "Edition Code",
             "CollectorNumber": "Collector Number",
             "Collector number": "Collector Number",
             "Collector #": "Collector Number",
-            "Foil": "Finish",
-            "Finish": "Finish",
+            "Foil": "Foil",
+            "Finish": "Foil",
+            "Finishes": "Finishes",
             "MV": "Mana Value",
             "Mana value": "Mana Value",
             "Color identities": "Identities",
             "Color identity": "Identities",
             "Card types": "Types",
             "Oracle ID": "Scryfall Oracle ID",
+            # Cardsphere-style headers
+            "Sets": "Sets",
+            "Conditions": "Conditions",
+            "Languages": "Languages",
+            "Offer": "Offer",
+            "Limit": "Limit",
+            "Paused": "Paused",
+            "Tags": "Tags",
         }
 
         # Full list of headers we know how to fill (empty if unavailable)
@@ -7461,6 +8053,29 @@ def api_scans_export_download():
 
         def _get(ag, key, default=""):
             return (ag.get("scry") or {}).get(key, default)
+        LANG_MAP = {
+            "en": "English", "eng": "English",
+            "de": "German", "es": "Spanish", "fr": "French",
+            "it": "Italian", "pt": "Portuguese", "ja": "Japanese",
+            "ko": "Korean", "ru": "Russian", "zhs": "Chinese (Simplified)",
+            "zht": "Chinese (Traditional)"
+        }
+        def _lang_val(ag, for_cardsphere=False):
+            val = (_get(ag, "lang") or "en").strip()
+            if for_cardsphere:
+                return LANG_MAP.get(val.lower(), "English")
+            return val.upper()
+        def _lang_from_param(val):
+            v = (val or "").strip()
+            if not v:
+                return ""
+            vl = v.lower()
+            if vl in LANG_MAP:
+                return LANG_MAP[vl]
+            for code, name in LANG_MAP.items():
+                if vl == name.lower():
+                    return name
+            return ""
 
         def _price(ag, which):
             try:
@@ -7487,14 +8102,22 @@ def api_scans_export_download():
         FIELD_FNS = OrderedDict([
             ("Quantity",             lambda ag: ag["count"]),
             ("Name",                 lambda ag: ag["name"]),
-            ("Finish",               lambda ag: "Foil" if ag["foil"] else "Normal"),
+            ("Foil",                 lambda ag: "true" if ag["foil"] else "false"),
             ("Condition",            lambda ag: "NM"),
+            ("Conditions",           lambda ag: "NM"),
             ("Date Added",           lambda ag: time.strftime("%Y-%m-%d", time.localtime(ag["first_ts"])) if ag["first_ts"] else ""),
-            ("Language",             lambda ag: (_get(ag, "lang") or "en").upper()),
+            ("Language",             lambda ag: _lang_val(ag)),
+            ("Languages",            lambda ag: _lang_val(ag)),
             ("Purchase Price",       lambda ag: ""),
             ("Tags",                 lambda ag: ""),
+            ("Paused",               lambda ag: ""),
+            ("Finishes",             lambda ag: "F" if ag["foil"] else "N"),
+            ("Offer",                lambda ag: "100"),
+            ("Limit",                lambda ag: _price(ag, "usd")),
             ("Edition Name",         lambda ag: _get(ag, "set_name", "")),
             ("Edition Code",         lambda ag: ag["setc"]),
+            ("Set",                  lambda ag: ag["setc"] or _get(ag, "set", "")),
+            ("Sets",                 lambda ag: ag["setc"] or _get(ag, "set", "")),
             ("Multiverse Id",        lambda ag: _first(_get(ag, "multiverse_ids"))),
             ("Scryfall ID",          lambda ag: _get(ag, "id", "")),
             ("MTGO ID",              lambda ag: _get(ag, "mtgo_id", "")),
@@ -7534,25 +8157,52 @@ def api_scans_export_download():
         if not user_fields:
             # Archidekt-ish default
             user_fields = [
-                "Quantity","Name","Finish","Condition","Date Added","Language",
+                "Quantity","Name","Foil","Condition","Date Added","Language",
                 "Edition Name","Edition Code","Collector Number",
                 "Scryfall ID","Scryfall Oracle ID",
                 "Mana Value","Identities","Mana cost","Types","Sub-types","Super-types","Rarity"
             ]
 
+        cardsphere_import_flag = str(
+            a.get("cardsphere_import")
+            or a.get("cs_import")
+            or a.get("cardsphere")
+            or ""
+        ).lower() in ("1","true","yes","on")
+        cardsphere_import = cardsphere_import_flag or user_fields == CARDSPHERE_IMPORT_FIELDS
+        if cardsphere_import:
+            user_fields = CARDSPHERE_IMPORT_FIELDS.copy()
+
         # Always ensure Quantity + Name are present (first/second), even if user unchecked by mistake
-        for must in ["Quantity", "Name"]:
-            if must not in user_fields:
-                user_fields.insert(0 if must == "Quantity" else 1, must)
+        if not cardsphere_import:
+            for must in ["Quantity", "Name"]:
+                if must not in user_fields:
+                    user_fields.insert(0 if must == "Quantity" else 1, must)
 
         # Build CSV
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(user_fields)
-        for key in sorted(aggs.keys()):
-            ag = aggs[key]
-            row = [FIELD_FNS[h](ag) for h in user_fields]
-            w.writerow(row)
+        if cardsphere_import:
+            w.writerow(user_fields)
+            for key in sorted(aggs.keys()):
+                ag = aggs[key]
+                foil_val = "true" if ag["foil"] else ""
+                cond_val = ""
+                lang_val = ""  # let Cardsphere importer apply its own defaults
+                row = [
+                    ag["name"],
+                    ag["setc"],
+                    int(ag["count"] or 0),
+                    foil_val,
+                    cond_val,
+                    lang_val,
+                ]
+                w.writerow(row)
+        else:
+            for key in sorted(aggs.keys()):
+                ag = aggs[key]
+                row = [FIELD_FNS[h](ag) for h in user_fields]
+                w.writerow(row)
 
         data = buf.getvalue().encode("utf-8")
         return Response(
@@ -7573,6 +8223,148 @@ def api_scans_export_download():
         mimetype="text/plain",
         headers={"Content-Disposition": f'attachment; filename="{fn_base}.txt"'}
     )
+
+@app.post("/api/history/export/full")
+def api_history_export_full():
+    data = request.get_json(silent=True) or {}
+    compact = bool(data.get("compact_images") or data.get("compact"))
+    deck_status = (data.get("deck_status") or "all").lower()
+    if deck_status not in ("all", "pass", "pass_no_review", "review", "fail"):
+        deck_status = "all"
+    try:
+        fname, fpath, count = _history_export_to_tar(compact_images=compact, decklist_status=deck_status)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"export failed: {e}"}), 500
+    if not fname or not fpath:
+        return jsonify({"ok": False, "error": "no history to export"}), 400
+    url = f"/exports/history/{fname}"
+    return jsonify({
+        "ok": True,
+        "filename": fname,
+        "saved_path": os.path.abspath(fpath),
+        "url": url,
+        "count": count,
+        "compact_images": bool(compact),
+        "decklist_status": deck_status,
+    })
+
+@app.get("/exports/history/<path:fname>")
+def serve_history_export(fname):
+    if not re.match(r"^[\w.\-]+\.tar\.gz$", fname):
+        return jsonify({"ok": False, "error": "invalid filename"}), 400
+    fpath = os.path.join(EXPORT_DIR, fname)
+    if not os.path.exists(fpath):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return send_from_directory(EXPORT_DIR, fname, mimetype="application/gzip", as_attachment=True)
+
+@app.post("/api/history/import")
+def api_history_import():
+    global scan_history
+    mode = (request.form.get("mode") or "replace").lower()
+    if mode not in ("replace", "merge"):
+        mode = "replace"
+    reassign = str(request.form.get("reassign_on_conflict", "true")).lower() in ("1","true","yes","on")
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify({"ok": False, "error": "missing file"}), 400
+    _ensure_history_dirs()
+
+    tmp_path = None
+    tmp_dir = None
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix="history_import_", suffix=".tar.gz")
+        os.close(tmp_fd)
+        uploaded.save(tmp_path)
+
+        tmp_dir = tempfile.mkdtemp(prefix="history_import_")
+        with tarfile.open(tmp_path, "r:*") as tf:
+            _safe_extract_tar(tf, tmp_dir)
+
+        manifest_path = os.path.join(tmp_dir, "manifest.json")
+        if not os.path.exists(manifest_path):
+            return jsonify({"ok": False, "error": "manifest.json missing"}), 400
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f) or {}
+        entries_meta = manifest.get("entries") or []
+        if not isinstance(entries_meta, list) or not entries_meta:
+            return jsonify({"ok": False, "error": "no entries in manifest"}), 400
+
+        loaded_entries = []
+        for m in entries_meta:
+            sid = int(m.get("id") or 0)
+            meta_rel = m.get("meta") or f"history/{sid}.json"
+            meta_path = os.path.join(tmp_dir, meta_rel)
+            if not sid or not os.path.exists(meta_path):
+                continue
+            try:
+                with open(meta_path, "r") as f:
+                    entry = json.load(f) or {}
+            except Exception:
+                continue
+            entry["id"] = sid
+
+            def _read_rel(rel):
+                if not rel:
+                    return b""
+                p = os.path.join(tmp_dir, rel)
+                try:
+                    with open(p, "rb") as fh:
+                        return fh.read()
+                except Exception:
+                    return b""
+
+            entry["snap_jpg"] = _read_rel(m.get("snap"))
+            entry["thumb"]    = _read_rel(m.get("thumb"))
+            entry["cmp_jpg"]  = _read_rel(m.get("cmp"))
+            loaded_entries.append(entry)
+
+        if not loaded_entries:
+            return jsonify({"ok": False, "error": "no entries could be read"}), 400
+
+        if mode == "replace":
+            _wipe_history_from_disk()
+            with history_lock:
+                scan_history.clear()
+                seq_entry_map.clear()
+                timed_out_seqs.clear()
+
+        with history_lock:
+            existing_ids = {int(e.get("id")) for e in scan_history}
+
+        imported = 0
+        for e in loaded_entries:
+            sid = int(e.get("id") or 0)
+            if mode == "merge" and sid in existing_ids:
+                if not reassign:
+                    continue
+                sid = _generate_new_scan_id(existing_ids)
+                e["id"] = sid
+            existing_ids.add(sid)
+            _persist_entry_to_disk(e)
+            imported += 1
+
+        with history_lock:
+            scan_history = _load_history_from_disk()
+
+        return jsonify({
+            "ok": True,
+            "imported": imported,
+            "mode": mode,
+            "total": len(scan_history),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"import failed: {e}"}), 500
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        try:
+            if tmp_dir and os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 @app.get("/exports/<path:fname>")
 def serve_export(fname):
@@ -7617,22 +8409,54 @@ def api_scrysearch():
     name = (request.args.get('name') or '').strip()
     number = (request.args.get('number') or '').strip()
     set_hint = (request.args.get('set') or '').strip().lower()
-    # Build a Scryfall search query from any combination of inputs (name, set, number)
-    parts = []
-    if name:
-        parts.append(f'!"{name}"')
     cn_norm = _normalize_cn_for_search(number)
+
+    def _query(parts):
+        if not parts:
+            return []
+        q = " ".join(parts)
+        data = _scryfall_request("https://api.scryfall.com/cards/search",
+                                 {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
+        return (data or {}).get("data", []) if data and data.get("data") else []
+
+    # Preferred: exact name + set/number
+    queries = []
+    exact = []
+    if name:
+        exact.append(f'!"{name}"')
     if cn_norm:
-        parts.append(f"cn:{cn_norm}")
+        exact.append(f"cn:{cn_norm}")
     if set_hint:
-        parts.append(f"set:{set_hint}")
-    if not parts:
+        exact.append(f"set:{set_hint}")
+    if exact:
+        queries.append(exact)
+
+    # Fallback: fuzzy name with set/number
+    fuzzy = []
+    if name:
+        fuzzy.append(f"{name}")
+    if cn_norm:
+        fuzzy.append(f"cn:{cn_norm}")
+    if set_hint:
+        fuzzy.append(f"set:{set_hint}")
+    if fuzzy:
+        queries.append(fuzzy)
+
+    # Fallback: name only
+    if name:
+        queries.append([name])
+
+    results_raw = []
+    for parts in queries:
+        results_raw = _query(parts)
+        if results_raw:
+            break
+
+    if not results_raw:
         return jsonify({"ok": True, "results": []})
-    q = " ".join(parts)
-    data = _scryfall_request("https://api.scryfall.com/cards/search",
-                             {"q": q, "unique": "prints", "order": "released", "dir": "desc"})
+
     results = []
-    for c in (data or {}).get("data", [])[:12]:
+    for c in results_raw[:12]:
         img = (c.get("image_uris") or {}).get("small")
         if not img and c.get("card_faces"):
             img = ((c["card_faces"][0].get("image_uris") or {}).get("small"))
@@ -7655,15 +8479,22 @@ def _settings_load():
     except Exception:
         return {}
 
-def _settings_save(data: dict):
-    os.makedirs(os.path.dirname(os.path.abspath(SETTINGS_PATH)), exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+def _settings_save(data: dict, path: str = None):
+    target = path or SETTINGS_PATH
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
 
 # ---- Settings helpers (single source of truth) ----
 # (removed duplicate definition of _settings_load)
 
 # (removed duplicate definition of _settings_save)
+
+try:
+    from . import config as _config_mod
+    _CONFIG_KEYS = sorted([k for k in dir(_config_mod) if k.isupper() and not k.startswith("_")])
+except Exception:
+    _CONFIG_KEYS = []
 
 RESTART_KEYS = {
     "CAMERA_DEVICE", "REQ_WIDTH", "REQ_HEIGHT", "REQ_FPS",
@@ -7735,84 +8566,43 @@ def _apply_settings_runtime(changes: dict):
         )
 
 def _effective_settings():
-    # current runtime values (imported from config.py at startup)
-    def L(v):  # ensure JSON-friendly for tuples
-        return list(v) if isinstance(v, (list, tuple)) else v
-    return {
-        # Camera
-        "CAMERA_DEVICE": CAMERA_DEVICE, "REQ_WIDTH": REQ_WIDTH, "REQ_HEIGHT": REQ_HEIGHT,
-        "REQ_FPS": REQ_FPS, "FOURCC_PRIMARY": FOURCC_PRIMARY, "FOURCC_FALLBACK": FOURCC_FALLBACK,
-        # Processing / Canvas
-        "PROC_MAX_WIDTH": PROC_MAX_WIDTH, "PROC_DOWNSCALE_MAX_W": PROC_DOWNSCALE_MAX_W,
-        "CARD_W": CARD_W, "CARD_H": CARD_H,
-        "MIN_CARD_AREA_RATIO": MIN_CARD_AREA_RATIO, "MAX_CARD_AREA_RATIO": MAX_CARD_AREA_RATIO,
-        "BORDER_MARGIN_PCT": BORDER_MARGIN_PCT, "CARD_ASPECT": CARD_ASPECT, "ASPECT_TOL": ASPECT_TOL,
-        "CONFIRM_FRAMES": CONFIRM_FRAMES, "STALE_FRAMES": STALE_FRAMES, "MAX_ASSOC_DIST": MAX_ASSOC_DIST,
-        "MAX_CARDS": MAX_CARDS, "DETECT_EVERY_N_FRAMES": DETECT_EVERY_N_FRAMES,
-        "RECTANGULARITY_MIN": RECTANGULARITY_MIN, "DETECT_QUAD_PAD_PCT": DETECT_QUAD_PAD_PCT,
-        "MANUAL_CROP_ENABLED": manual_crop_enabled,
-        "MANUAL_CROP_QUAD": L(manual_crop_quad.tolist()),
-        # Capture timing
-        "AUTO_CAPTURE_WAIT_S": AUTO_CAPTURE_WAIT_S,
-        "AUTOSCAN_OCR_TIMEOUT": AUTOSCAN_OCR_TIMEOUT,
-        # OCR & Debug
-        "OCR_BACKEND": OCR_BACKEND, "OCR_ONLY_ON_SNAPSHOT": OCR_ONLY_ON_SNAPSHOT,
-        "DEBUG_OCR": DEBUG_OCR, "OCR_DEBUG_BOXES": OCR_DEBUG_BOXES, "SHOW_ROI_OVERLAY": SHOW_ROI_OVERLAY,
-        "MIN_TITLE_LETTERS": MIN_TITLE_LETTERS, "TEXT_PRESENCE_MIN": TEXT_PRESENCE_MIN,
-        "TITLE_ALLOW_TESS_FALLBACK": TITLE_ALLOW_TESS_FALLBACK, "USE_TESS_FOR_TITLES": USE_TESS_FOR_TITLES,
-        "OCR_ENABLE_BLACKHAT": OCR_ENABLE_BLACKHAT,
-        "FAST_OCR_MODE": _fast_mode(),
-        "LIVE_OCR_ONLY_WHEN_STEADY": LIVE_OCR_ONLY_WHEN_STEADY,
-        "LIVE_OCR_MIN_INTERVAL": LIVE_OCR_MIN_INTERVAL,
-        "USE_OPENCL": USE_OPENCL,
-        # Foil
-        "FOIL_MIN_SCORE": FOIL_MIN_SCORE, "FOIL_ON_TH": FOIL_ON_TH,
-        "FOIL_OFF_TH": FOIL_OFF_TH, "FOIL_DETECT": FOIL_DETECT, "FOIL_EVERY_N_FRAMES": FOIL_EVERY_N_FRAMES,
-        # Match
-        "MATCH_ENABLE": MATCH_ENABLE, "MATCH_W_HASH": MATCH_W_HASH, "MATCH_W_HIST": MATCH_W_HIST,
-        "MATCH_W_ORB": MATCH_W_ORB, "MATCH_TH": MATCH_TH, "NAME_OK_TH": NAME_OK_TH,
-        "MATCH_REQUIRE_ORB": MATCH_REQUIRE_ORB, "MATCH_ORB_FAIL_THRESHOLD": MATCH_ORB_FAIL_THRESHOLD,
-        "ALWAYS_SCAN_OK": ALWAYS_SCAN_OK, "MATCH_USE_ART": MATCH_USE_ART, "MATCH_ORB_FEATURES": MATCH_ORB_FEATURES,
-        "MATCH_FAST_ACCEPT_DELTA": MATCH_FAST_ACCEPT_DELTA, "MATCH_FAST_REJECT_DELTA": MATCH_FAST_REJECT_DELTA,
-        "HASH_STABILITY_BITS": HASH_STABILITY_BITS,
-        # Prices
-        "SCRYFALL_TIMEOUT": SCRYFALL_TIMEOUT, "FX_URL": FX_URL, "FX_TTL_SEC": FX_TTL_SEC,
-        # Moonraker / Klipper
-        "MOONRAKER_URL": MOONRAKER_URL, "HTTP_POST_URL": HTTP_POST_URL,
-        # Stacks / Sorter
-        "CARD_THICKNESS_MM": CARD_THICKNESS_MM,
-        "REMEASURE_EVERY": REMEASURE_EVERY,
-        # Debug & Paths
-        "DEBUG_LEVEL": DEBUG_LEVEL,
-        "SC_IMG_CACHE_DIR": SC_IMG_CACHE_DIR,
-        # Persistence
-        "HISTORY_DIR": HISTORY_DIR, "HISTORY_IMG_DIR": HISTORY_IMG_DIR,
-        "HISTORY_JSON_EXT": HISTORY_JSON_EXT, "JPEG_QUALITY_SNAP": JPEG_QUALITY_SNAP,
-        "JPEG_QUALITY_CMP": JPEG_QUALITY_CMP, "JPEG_QUALITY_THUMB": JPEG_QUALITY_THUMB,
-        "HISTORY_API_DEFAULT_LIMIT": HISTORY_API_DEFAULT_LIMIT,
-        "HISTORY_API_MAX_LIMIT": HISTORY_API_MAX_LIMIT,
-        
-        # AI / YOLOv5
-        "AI_ENABLED": AI_ENABLED, "AI_USE_FOR_CARDS": AI_USE_FOR_CARDS, "AI_USE_FOR_ROIS": AI_USE_FOR_ROIS,
-        "AI_ROIS_SNAPSHOT_ONLY": bool(globals().get("AI_ROIS_SNAPSHOT_ONLY", False)),
-        "AI_ONLY_MODE": AI_ONLY_MODE, "AI_MODEL_PATH": AI_MODEL_PATH, "YOLOV5_DIR": YOLOV5_DIR,
-        "AI_IMG_SIZE": AI_IMG_SIZE, "AI_CONF_THRES": AI_CONF_THRES, "AI_IOU_THRES": AI_IOU_THRES,
-        "AI_MAX_DETS": AI_MAX_DETS, "AI_CLASS_NAMES": AI_CLASS_NAMES,
-# Server
-        "HOST": HOST, "PORT": PORT,
-        # Tracking / motion / appearance
-        "TRACK_ALPHA": TRACK_ALPHA, "TRACK_BETA": TRACK_BETA, "TRACK_DEADBAND_PX": TRACK_DEADBAND_PX,
-        "LOCK_IOU_THRESH": LOCK_IOU_THRESH, "ACQUIRE_FRAMES": ACQUIRE_FRAMES,
-        "DROP_MISS_FRAMES": DROP_MISS_FRAMES, "PREDICT_HOLD": PREDICT_HOLD,
-        "STEADY_SPEED_PX": STEADY_SPEED_PX, "WARP_EXPAND_PCT": WARP_EXPAND_PCT,
-        "WARP_CROP_PCT": WARP_CROP_PCT, "DETECT_MAX_FPS": DETECT_MAX_FPS,
-        "APPEARANCE_ALIGN_ENABLE": APPEARANCE_ALIGN_ENABLE,
-        "APPEARANCE_AB_STRENGTH": APPEARANCE_AB_STRENGTH,
-        "APPEARANCE_SAT_STRENGTH": APPEARANCE_SAT_STRENGTH,
-        "APPEARANCE_GAMMA_CLAMP": L(APPEARANCE_GAMMA_CLAMP),
-        "TONE_ALIGN_ENABLE": TONE_ALIGN_ENABLE,
-        "TRACK_BOX_BLEND": TRACK_BOX_BLEND,
-    }
+    def _json_safe(val):
+        try:
+            import numpy as _np
+        except Exception:
+            _np = None
+        if _np is not None and isinstance(val, _np.ndarray):
+            return val.tolist()
+        if _np is not None and isinstance(val, _np.generic):
+            try:
+                return val.item()
+            except Exception:
+                pass
+        if isinstance(val, dict):
+            return {k: _json_safe(v) for k, v in val.items()}
+        if isinstance(val, (list, tuple)):
+            return [_json_safe(v) for v in val]
+        return val
+
+    eff = {}
+    for key in _CONFIG_KEYS:
+        if key == "FAST_OCR_MODE":
+            eff[key] = _fast_mode()
+            continue
+        if key == "MANUAL_CROP_ENABLED":
+            eff[key] = bool(manual_crop_enabled)
+            continue
+        if key == "MANUAL_CROP_QUAD":
+            eff[key] = _json_safe(manual_crop_quad)
+            continue
+        if key not in globals():
+            continue
+        eff[key] = _json_safe(globals().get(key))
+
+    # Always expose the live manual-crop state, even if settings.json is stale.
+    eff["MANUAL_CROP_ENABLED"] = bool(manual_crop_enabled)
+    eff["MANUAL_CROP_QUAD"] = _json_safe(manual_crop_quad)
+    return eff
 
 @app.get("/api/settings")
 def api_settings_get():
@@ -7837,7 +8627,8 @@ def api_settings_post():
 
     cur = _settings_load() or {}
     cur.update(incoming)
-    _settings_save(cur)
+    target_path = incoming.get("SETTINGS_PATH") or SETTINGS_PATH
+    _settings_save(cur, path=target_path)
 
     _apply_settings_runtime(incoming)
 
@@ -7848,6 +8639,50 @@ def api_settings_post():
     if any(k in incoming for k in ("REMEASURE_EVERY","CARD_THICKNESS_MM")):
         _apply_printer_settings_with_retry(reason="settings_save")
     return jsonify({"ok": True, "saved": incoming, "restart_required": needs_restart})
+
+@app.get("/api/history/quarantine")
+def api_history_quarantine_list():
+    try:
+        items = _list_quarantined_entries()
+        return jsonify({"ok": True, "items": items})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.post("/api/history/quarantine/<int:sid>/autofix")
+def api_history_quarantine_autofix(sid):
+    try:
+        summary = _restore_quarantine_entry(sid)
+        return jsonify({"ok": True, "restored": summary})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.post("/api/history/quarantine/<int:sid>/save")
+def api_history_quarantine_save(sid):
+    body = request.get_json(silent=True) or {}
+    incoming = body.get("entry") or {}
+    meta_p, _, _, _ = _quarantine_paths_for_sid(sid)
+    parsed = _parse_quarantine_meta(meta_p) or {}
+    merged = dict(parsed)
+    for key in (
+        "name","set_hint","number","number_raw","status","match_score","match_ok",
+        "flagged","review_reasons","review_level","auto_name_fix","scry","scry_set",
+        "scry_cn","scry_name","foil","foil_score","inputs_present","ts"
+    ):
+        if key in incoming:
+            merged[key] = incoming[key]
+    try:
+        summary = _restore_quarantine_entry(sid, meta_override=merged)
+        return jsonify({"ok": True, "restored": summary})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.delete("/api/history/quarantine/<int:sid>")
+def api_history_quarantine_delete(sid):
+    try:
+        _quarantine_cleanup_files(sid)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.post("/api/manual_crop")
 def api_manual_crop():
@@ -7999,6 +8834,22 @@ def _cleanup_reprocess_cache(now=None):
     for token in stale:
         _reprocess_cache.pop(token, None)
 
+def _flagged_and_failed_snapshots(limit=0):
+    """Return copies of all flagged entries plus any non-flagged fails, newest-first."""
+    with history_lock:
+        flagged = [dict(e) for e in scan_history if e.get("flagged")]
+        flagged_ids = {e.get("id") for e in flagged}
+        failed_only = [
+            dict(e) for e in scan_history
+            if (str(e.get("status","")).lower() == "fail") and (e.get("id") not in flagged_ids)
+        ]
+    combined = flagged + failed_only
+    if limit and limit > 0:
+        combined = combined[:limit]
+    flagged_ct = sum(1 for e in combined if e.get("flagged"))
+    failed_ct = sum(1 for e in combined if (str(e.get("status","")).lower() == "fail") and not e.get("flagged"))
+    return combined, flagged_ct, failed_ct
+
 def _store_reprocess_result(sid, payload):
     token = uuid.uuid4().hex
     now = time.time()
@@ -8048,12 +8899,12 @@ def _apply_reprocess_candidate(target, candidate):
     target["foil_score"] = float(ocr.get("foil_score", target.get("foil_score", 0.0)))
     target["scry"] = candidate.get("scry")
     target["match_score"] = round(float(candidate.get("match_score", 0.0)), 3)
-    target["match_ok"] = bool(candidate.get("match_ok")) if candidate.get("match_ok") is not None else None
-    status = (candidate.get("status") or ("pass" if target["match_ok"] else "fail")).lower()
-    target["status"] = status
-    target["flagged"] = bool(candidate.get("flagged") or (status != "pass"))
-    target["review_reasons"] = list(candidate.get("review_reasons") or [])
-    target["review_level"] = candidate.get("review_level")
+    # User explicitly accepted this result, so mark it as a pass and clear flags regardless of match score.
+    target["match_ok"] = True
+    target["status"] = "pass"
+    target["flagged"] = False
+    target["review_reasons"] = []
+    target["review_level"] = None
     target["auto_name_fix"] = bool(candidate.get("auto_name_fix", target.get("auto_name_fix", False)))
     if candidate.get("inputs_present"):
         target["inputs_present"] = dict(candidate.get("inputs_present"))
@@ -8240,6 +9091,20 @@ def _reprocess_job_update(job_id, **updates):
             return
         job.update(updates)
 
+def _reprocess_job_cancel(job_id):
+    with _reprocess_jobs_lock:
+        job = _reprocess_jobs.get(job_id)
+        if not job:
+            return False
+        job["status"] = "cancelled"
+        job["current_phase"] = "cancelled"
+        _reprocess_cancelled.add(job_id)
+        return True
+
+def _is_reprocess_cancelled(job_id):
+    with _reprocess_jobs_lock:
+        return job_id in _reprocess_cancelled or (_reprocess_jobs.get(job_id, {}).get("status") == "cancelled")
+
 def _reprocess_job_record_progress(job_id, phase, progress=None, current_id=None, card_progress=None):
     with _reprocess_jobs_lock:
         job = _reprocess_jobs.get(job_id)
@@ -8257,20 +9122,22 @@ def _reprocess_job_record_progress(job_id, phase, progress=None, current_id=None
 
 def _start_single_reprocess_job(sid):
     job_id = uuid.uuid4().hex
+    created_ts = time.time()
     job = {
         "id": job_id,
         "kind": "single",
         "sid": sid,
         "status": "running",
-        "created": time.time(),
+        "created": created_ts,
         "current_phase": "queued",
         "current_progress": 0.0,
         "result": None,
         "error": None,
     }
     with _reprocess_jobs_lock:
-        _cleanup_reprocess_jobs(job["created"])
         _reprocess_jobs[job_id] = job
+    # Clean up stale entries after releasing the lock to avoid deadlocks.
+    _cleanup_reprocess_jobs(created_ts)
 
     def _worker():
         with history_lock:
@@ -8279,6 +9146,9 @@ def _start_single_reprocess_job(sid):
         if not target:
             _reprocess_job_update(job_id, status="error", error="not found")
             return
+        if _is_reprocess_cancelled(job_id):
+            _reprocess_job_update(job_id, status="cancelled", current_phase="cancelled")
+            return
         old_summary = _summarize_entry_for_modal(target)
         try:
             def _cb(phase, frac):
@@ -8286,6 +9156,9 @@ def _start_single_reprocess_job(sid):
             result = _run_reprocess_on_entry(target, progress_cb=_cb)
             if result is None:
                 raise RuntimeError("no snapshot available")
+            if _is_reprocess_cancelled(job_id):
+                _reprocess_job_update(job_id, status="cancelled", current_phase="cancelled")
+                return
             token = _store_reprocess_result(sid, result)
             payload = {
                 "token": token,
@@ -8298,15 +9171,22 @@ def _start_single_reprocess_job(sid):
     threading.Thread(target=_worker, daemon=True).start()
     return job_id
 
-def _start_batch_reprocess_job(entries):
+def _start_batch_reprocess_job(entries, flagged_total=None, failed_total=None):
     job_id = uuid.uuid4().hex
     total = len(entries)
+    flagged_n = flagged_total if flagged_total is not None else sum(1 for e in entries if e.get("flagged"))
+    failed_n = failed_total if failed_total is not None else sum(
+        1 for e in entries if (str(e.get("status","")).lower() == "fail") and not e.get("flagged")
+    )
+    created_ts = time.time()
     job = {
         "id": job_id,
         "kind": "batch",
         "status": "running",
-        "created": time.time(),
+        "created": created_ts,
         "total": total,
+        "flagged_total": flagged_n,
+        "failed_total": failed_n,
         "done": 0,
         "progress": 0.0,
         "current_card": None,
@@ -8316,8 +9196,9 @@ def _start_batch_reprocess_job(entries):
         "error": None,
     }
     with _reprocess_jobs_lock:
-        _cleanup_reprocess_jobs(job["created"])
         _reprocess_jobs[job_id] = job
+    # Clear out any expired jobs after releasing the lock (avoid nested locking).
+    _cleanup_reprocess_jobs(created_ts)
 
     def _worker():
         try:
@@ -8326,6 +9207,9 @@ def _start_batch_reprocess_job(entries):
                 return
             results = []
             for idx, entry in enumerate(entries):
+                if _is_reprocess_cancelled(job_id):
+                    _reprocess_job_update(job_id, status="cancelled", current_phase="cancelled")
+                    return
                 rid = entry.get("id")
                 old_summary = _summarize_entry_for_modal(entry)
                 _reprocess_job_record_progress(
@@ -8333,6 +9217,8 @@ def _start_batch_reprocess_job(entries):
                     current_id=rid, card_progress=0.0
                 )
                 def _cb(phase, frac):
+                    if _is_reprocess_cancelled(job_id):
+                        raise RuntimeError("cancelled")
                     with _reprocess_jobs_lock:
                         job_ref = _reprocess_jobs.get(job_id)
                         done_cards = job_ref.get("done", 0) if job_ref else 0
@@ -8356,7 +9242,10 @@ def _start_batch_reprocess_job(entries):
                         job_ref["current_card"] = None
             _reprocess_job_update(job_id, status="done", items=results, progress=1.0, current_phase="done")
         except Exception as exc:
-            _reprocess_job_update(job_id, status="error", error=str(exc))
+            if _is_reprocess_cancelled(job_id) or str(exc) == "cancelled":
+                _reprocess_job_update(job_id, status="cancelled", current_phase="cancelled")
+            else:
+                _reprocess_job_update(job_id, status="error", error=str(exc))
     threading.Thread(target=_worker, daemon=True).start()
     return job_id
 
@@ -8387,6 +9276,7 @@ def api_scan_reprocess(sid):
 def api_scan_reprocess_apply(sid):
     data = request.get_json(silent=True) or {}
     token = (data.get("token") or "").strip()
+    override = data.get("override") or {}
     if not token:
         return jsonify({"ok": False, "error": "token required"}), 400
     if _scan_in_progress():
@@ -8395,6 +9285,23 @@ def api_scan_reprocess_apply(sid):
     if not meta or meta.get("sid") != sid:
         return jsonify({"ok": False, "error": "token expired"}), 400
     candidate = meta.get("payload")
+    # Apply user overrides to the OCR payload before saving.
+    try:
+        ocr = candidate.get("ocr") or {}
+        if override:
+            if "name" in override and str(override.get("name") or "").strip():
+                nm = str(override.get("name") or "").strip()
+                ocr["name"] = nm
+                ocr["name_raw"] = nm
+            if "set_hint" in override and str(override.get("set_hint") or "").strip():
+                ocr["set_hint"] = str(override.get("set_hint") or "").strip().lower()
+            if "number" in override and str(override.get("number") or "").strip():
+                num = str(override.get("number") or "").strip()
+                ocr["number_raw"] = num
+                ocr["number"] = num
+        candidate["ocr"] = ocr
+    except Exception:
+        pass
     with history_lock:
         target = next((e for e in scan_history if e["id"] == sid), None)
         if not target:
@@ -8434,13 +9341,10 @@ def api_scan_reprocess_apply(sid):
 def api_reprocess_flagged():
     mode = (request.args.get("mode") or "async").lower()
     limit = int(request.args.get("limit") or 0)
-    with history_lock:
-        snapshots = [dict(e) for e in scan_history if (e.get("flagged") or (str(e.get("status","")).lower() == "fail"))]
-    if limit > 0:
-        snapshots = snapshots[:limit]
+    snapshots, flagged_ct, failed_ct = _flagged_and_failed_snapshots(limit=limit)
     if mode in ("async", "1", "true"):
-        job_id = _start_batch_reprocess_job(snapshots)
-        return jsonify({"ok": True, "job": job_id, "total": len(snapshots)})
+        job_id = _start_batch_reprocess_job(snapshots, flagged_total=flagged_ct, failed_total=failed_ct)
+        return jsonify({"ok": True, "job": job_id, "total": len(snapshots), "flagged": flagged_ct, "failed": failed_ct})
     results = []
     for entry in snapshots:
         rid = entry.get("id")
@@ -8454,7 +9358,7 @@ def api_reprocess_flagged():
             "old": _summarize_entry_for_modal(entry),
             "candidate": _serialize_reprocess_candidate(candidate, rid),
         })
-    return jsonify({"ok": True, "total": len(snapshots), "items": results})
+    return jsonify({"ok": True, "total": len(snapshots), "flagged": flagged_ct, "failed": failed_ct, "items": results})
 
 @app.get('/api/reprocess/job/<job_id>')
 def api_reprocess_job(job_id):
@@ -8478,6 +9382,8 @@ def api_reprocess_job(job_id):
         elif job.get("kind") == "batch":
             payload.update({
                 "total": job.get("total", 0),
+                "flagged": job.get("flagged_total"),
+                "failed": job.get("failed_total"),
                 "done": job.get("done", 0),
                 "progress": job.get("progress", 0.0),
                 "current_card": job.get("current_card"),
@@ -8486,6 +9392,13 @@ def api_reprocess_job(job_id):
             if job.get("status") == "done":
                 payload["items"] = job.get("items", [])
         return jsonify(payload)
+
+@app.delete('/api/reprocess/job/<job_id>')
+def api_reprocess_cancel(job_id):
+    ok = _reprocess_job_cancel(job_id)
+    if not ok:
+        return jsonify({"ok": False, "error": "job not found"}), 404
+    return jsonify({"ok": True, "cancelled": job_id})
 
 # ===== Shared filter helpers =====
 def _parse_since(s):
@@ -8615,7 +9528,7 @@ def api_scans():
         "scry_cn":   (e.get("scry") or {}).get("collector_number",""),
         "set_hint": e.get("set_hint",""),
         "number_raw": e.get("number_raw",""),
-        "thumb_ok": bool(e.get("thumb") or e.get("snap_jpg")),
+        "thumb_ok": bool(e.get("thumb") or os.path.exists(_entry_paths(e["id"])[2])),
         "review_reasons": e.get("review_reasons", []),
         "review_level": e.get("review_level", "info"),
     } for e in out]
@@ -8640,6 +9553,7 @@ def api_scan_thumb(sid):
     with history_lock:
         for e in scan_history:
             if e["id"] == sid:
+                _ensure_entry_images(e)
                 return Response(e.get("thumb") or e.get("snap_jpg") or b"", mimetype='image/jpeg')
     return jsonify({"ok": False, "error": "not found"}), 404
 
@@ -8655,6 +9569,7 @@ def api_scan_load(sid):
         target = dict(target_ref) if target_ref else None
     if not target:
         return jsonify({"ok": False, "error": "not found"}), 404
+    _ensure_entry_images(target)
     snap = _decode_jpg(target.get("snap_jpg"))
     if snap is None:
         return jsonify({"ok": False, "error": "no snapshot bytes"}), 400
@@ -8957,10 +9872,12 @@ def _start_scry_warmup_once():
 
 _reprocess_cache = {}
 _reprocess_cache_lock = threading.Lock()
-REPROCESS_CACHE_TTL = 300.0
+# Allow plenty of time to review batch results before tokens expire.
+REPROCESS_CACHE_TTL = 3600.0
 _reprocess_jobs = {}
 _reprocess_jobs_lock = threading.Lock()
 REPROCESS_JOB_TTL = 900.0
+_reprocess_cancelled = set()
 # Ensure any Scryfall choice we resolve helps future DFC lookups
 # (Monkey-patch the resolver return path to index faces.)
 _orig__scryfall_lookup = _scryfall_lookup
@@ -9065,6 +9982,8 @@ def _apply_printer_settings_with_retry(reason="startup", attempts=3, delay=2.0):
             remeasure = int(cur.get("REMEASURE_EVERY", globals().get("REMEASURE_EVERY", 0)) or 0)
         except Exception:
             remeasure = int(globals().get("REMEASURE_EVERY", 0) or 0)
+        if STACK_PROBE_PER_PICK:
+            remeasure = 0
         try:
             thickness = float(cur.get("CARD_THICKNESS_MM", globals().get("CARD_THICKNESS_MM", 0.305)) or 0.305)
         except Exception:
@@ -9694,16 +10613,6 @@ def _fast_ocr_from_card_upright(img):
     num_dt = time.perf_counter() - _t_num
     if not number_disp:
         number_conf = 0.0
-        # Slow but more thorough number OCR fallback when the fast path missed
-        if not skip_number:
-            try:
-                tok_slow, conf_slow = _read_collector_number(img, foil=foil)
-                if tok_slow:
-                    number_raw = tok_slow
-                    number_disp = _parse_collector_for_display(number_raw)
-                    number_conf = max(number_conf, float(conf_slow or 0.0)) if number_disp else 0.0
-            except Exception:
-                pass
 
     # track set_hint even if we fall back later
     set_hint = ""

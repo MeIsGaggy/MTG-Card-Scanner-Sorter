@@ -64,7 +64,33 @@
   const batchStatus  = document.getElementById("reprocessBatchStatus");
   const batchList    = document.getElementById("reprocessBatchList");
   const batchOverallBar = document.getElementById("reprocessBatchOverallBar");
-  const batchCurrentBar = document.getElementById("reprocessBatchCurrentBar");
+  const btnQuarantine = document.getElementById("btnQuarantine");
+  const quarantineModal = document.getElementById("quarantine-modal");
+  const quarantineClose = document.getElementById("quarantine-close");
+  const quarantineList = document.getElementById("quarantine-list");
+  const qId = document.getElementById("q-id");
+  const qName = document.getElementById("q-name");
+  const qSet = document.getElementById("q-set");
+  const qNumber = document.getElementById("q-number");
+  const qStatus = document.getElementById("q-status");
+  const qMatch = document.getElementById("q-match");
+  const qFlagged = document.getElementById("q-flagged");
+  const qReasons = document.getElementById("q-reasons");
+  const qStatusText = document.getElementById("q-status-text");
+  const qAutoFix = document.getElementById("q-autofix");
+  const qSave = document.getElementById("q-save");
+  const qDelete = document.getElementById("q-delete");
+  const btnBackup = document.getElementById("btn-backup");
+  const backupModal = document.getElementById("backup-modal");
+  const backupClose = document.getElementById("backup-close");
+  const backupExport = document.getElementById("backup-export");
+  const backupExportStatus = document.getElementById("backup-export-status");
+  const backupCompact = document.getElementById("backup-compact");
+  const backupImport = document.getElementById("backup-import");
+  const backupImportStatus = document.getElementById("backup-import-status");
+  const backupFile = document.getElementById("backup-file");
+  const backupMode = document.getElementById("backup-mode");
+  const backupReassign = document.getElementById("backup-reassign");
   const consoleBox   = document.getElementById("consoleBox");
   const btnLogPause  = document.getElementById("btnLogPause");
   const btnLogClear  = document.getElementById("btnLogClear");
@@ -83,11 +109,13 @@ let filterContext = 'list';
   let reprocessToken = null;
   let reprocessTargetId = null;
   let reprocessBatchItems = [];
+  let reprocessBatchJobId = null;
   let reprocessProgressStop = null;
   let batchOverallProgressStop = null;
-  let batchCurrentProgressStop = null;
   const SCAN_META_LIMIT = 2000;
   const scanMetaCache = new Map();
+  let quarantineItems = [];
+  let activeQuarantineId = null;
   let activeEditId = null;
   const manualDefaultQuad = [[0.18, 0.10], [0.82, 0.10], [0.82, 0.92], [0.18, 0.92]];
   let manualQuad = manualDefaultQuad.map(p => p.slice());
@@ -704,18 +732,36 @@ const fmodal = $('#filter-modal');
 const backdrop = $('#filter-backdrop');
 
 function openFilter() {
-  backdrop.classList.remove('hidden');
+  openBackdrop();
   fmodal.classList.remove('hidden');
 }
 function closeFilter() {
-  backdrop.classList.add('hidden');
   fmodal.classList.add('hidden');
+  hideBackdropIfNone();
 }
 // set filterContext list on btn-open-filter
 $('#btn-open-filter')?.addEventListener('click', () => { filterContext='list'; applyFilterFieldsFromQS(historyQueryQS); openFilter(); });
 $('#filter-close')?.addEventListener('click', closeFilter);
-backdrop?.addEventListener('click', ()=>{ closeFilter(); closeExport?.(); closeEditModal?.(); });
-document.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ closeFilter(); closeExport?.(); closeEditModal?.(); }});
+backdrop?.addEventListener('click', ()=>{
+  closeFilter();
+  closeExport?.();
+  closeEditModal?.();
+  closeBackupModal?.();
+  closeHistoryModal();
+  document.getElementById("history-options-modal")?.classList.add("hidden");
+  closeQuarantineModal();
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key==='Escape'){
+    closeFilter();
+    closeExport?.();
+    closeEditModal?.();
+    closeBackupModal?.();
+    closeHistoryModal();
+    document.getElementById("history-options-modal")?.classList.add("hidden");
+    closeQuarantineModal();
+  }
+});
 
 
 
@@ -998,6 +1044,39 @@ const SETTINGS_SCHEMA = [
 
 ];
 
+const SETTINGS_BASE_KEYS = new Set(SETTINGS_SCHEMA.flatMap((sec) => sec.items.map((it) => it.k)));
+let currentSettingsSchema = SETTINGS_SCHEMA;
+
+function inferSettingType(val) {
+  if (typeof val === "boolean") return "bool";
+  if (typeof val === "number") return Number.isInteger(val) ? "int" : "float";
+  if (Array.isArray(val) || (val && typeof val === "object")) return "json";
+  return "text";
+}
+
+function humanizeSettingKey(key) {
+  return (key || "")
+    .split("_")
+    .map((part) => (part ? (part[0].toUpperCase() + part.slice(1).toLowerCase()) : ""))
+    .join(" ")
+    .trim() || key;
+}
+
+function buildSettingsSchema(data) {
+  const extras = [];
+  const known = new Set(SETTINGS_BASE_KEYS);
+  Object.keys(data || {}).sort().forEach((k) => {
+    if (!k || k.startsWith("__")) return;
+    if (known.has(k)) return;
+    if (k.toUpperCase() !== k) return;
+    extras.push({ k, label: humanizeSettingKey(k), type: inferSettingType(data[k]) });
+  });
+  if (!extras.length) return SETTINGS_SCHEMA;
+  const base = SETTINGS_SCHEMA.map((sec) => ({ title: sec.title, items: sec.items.slice() }));
+  base.push({ title: "Other Settings", items: extras });
+  return base;
+}
+
 // ===== Settings Modal (fixed, long scrollable form) =====
 
 // Wire the “open settings” button
@@ -1042,18 +1121,22 @@ async function renderSettings(forceFresh = false) {
   if (!settingsForm) return;
   settingsForm.innerHTML = '<div class="mm-field">Loading…</div>';
 
-const res = await fetch('/api/settings' + (forceFresh ? ('?t=' + Date.now()) : ''));
-let cur = await res.json();
-// If the backend ever returns {__effective, __path}, we only use the flat key-values for the form.
-if (cur && cur.__effective && cur.__path) {
-  // cur already contains the merged {**effective, **saved}, so just keep it.
-  // (extra keys are ignored by the schema)
-}
+  let cur = {};
+  try {
+    const res = await fetch('/api/settings' + (forceFresh ? ('?t=' + Date.now()) : ''));
+    cur = await res.json();
+  } catch (err) {
+    settingsForm.innerHTML = '<div class="mm-field">Failed to load settings (click Reset to retry)</div>';
+    return;
+  }
+  // cur already contains the merged {**effective, **saved}; helper keys (__effective, __path) are ignored by the schema.
 
+  const schema = buildSettingsSchema(cur);
+  currentSettingsSchema = schema;
 
   const frag = document.createDocumentFragment();
 
-  SETTINGS_SCHEMA.forEach((sec) => {
+  schema.forEach((sec) => {
     const section = document.createElement('section');
     section.className = 'mm-section';
 
@@ -1081,24 +1164,44 @@ function fieldEl(it, val) {
   const wrap = document.createElement('div');
   wrap.className = 'mm-field';
   const id = 's__' + it.k;
+  const type = it.type || inferSettingType(val);
 
   const label = document.createElement('label');
   label.htmlFor = id;
   label.textContent = it.label;
   wrap.appendChild(label);
 
-  if (it.type === 'bool') {
+  if (type === 'bool') {
     const sel = document.createElement('select');
     sel.id = id;
     sel.className = 'mm-input';
+    sel.dataset.type = 'bool';
     ['true', 'false'].forEach((v) => {
       const o = document.createElement('option');
       o.value = v;
       o.textContent = v;
-      if (String(val).toLowerCase() === v) o.selected = true;
+      const valStr = String(val).toLowerCase();
+      if ((val === true && v === 'true') || (val === false && v === 'false') || valStr === v) {
+        o.selected = true;
+      }
       sel.appendChild(o);
     });
     wrap.appendChild(sel);
+    return wrap;
+  }
+
+  if (type === 'json') {
+    const ta = document.createElement('textarea');
+    ta.id = id;
+    ta.className = 'mm-input';
+    ta.dataset.type = 'json';
+    try {
+      ta.value = JSON.stringify(val, null, 2);
+    } catch (e) {
+      ta.value = String(val ?? '');
+    }
+    ta.rows = Math.min(6, Math.max(2, ta.value.split('\n').length));
+    wrap.appendChild(ta);
     return wrap;
   }
 
@@ -1107,8 +1210,9 @@ function fieldEl(it, val) {
   inp.type = 'text';
   inp.value = val ?? '';
   inp.className = 'mm-input';
-  if (it.type === 'int') inp.inputMode = 'numeric';
-  if (it.type === 'float') inp.inputMode = 'decimal';
+  inp.dataset.type = type;
+  if (type === 'int') inp.inputMode = 'numeric';
+  if (type === 'float') inp.inputMode = 'decimal';
   wrap.appendChild(inp);
   return wrap;
 }
@@ -1116,31 +1220,67 @@ function fieldEl(it, val) {
 // Collect all values across the whole long form
 function collect() {
   const out = {};
-  SETTINGS_SCHEMA.forEach((sec) => {
+  const errors = [];
+  const schema = currentSettingsSchema || SETTINGS_SCHEMA;
+  schema.forEach((sec) => {
     sec.items.forEach((it) => {
       const id = 's__' + it.k;
-      if (it.type === 'bool') {
-        out[it.k] = (document.getElementById(id).value === 'true');
-      } else {
-        const v = document.getElementById(id).value;
-        if (it.type === 'int') out[it.k] = parseInt(v || '0', 10);
-        else if (it.type === 'float') out[it.k] = parseFloat(v || '0');
-        else out[it.k] = v;
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (el.classList) el.classList.remove('mm-error');
+      const type = it.type || el.dataset?.type || 'text';
+      const raw = (el.value ?? '').trim();
+      if (type === 'bool') {
+        out[it.k] = (el.value === 'true');
+        return;
       }
+      if (type === 'int' || type === 'float') {
+        const num = (type === 'int') ? parseInt(raw || '0', 10) : parseFloat(raw || '0');
+        if (Number.isNaN(num)) {
+          errors.push(`${it.k}: invalid number`);
+          el.classList?.add('mm-error');
+          return;
+        }
+        out[it.k] = num;
+        return;
+      }
+      if (type === 'json') {
+        if (!raw) { out[it.k] = null; return; }
+        try {
+          out[it.k] = JSON.parse(raw);
+        } catch (err) {
+          errors.push(`${it.k}: ${err.message}`);
+          el.classList?.add('mm-error');
+        }
+        return;
+      }
+      out[it.k] = el.value;
     });
   });
+  if (errors.length) {
+    throw new Error(errors.join('\n'));
+  }
   return out;
 }
 
 async function saveSettings() {
-  const payload = collect();
+  let payload;
+  try {
+    payload = collect();
+  } catch (err) {
+    alert('Settings not saved: ' + err.message);
+    return;
+  }
   const res = await fetch('/api/settings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  const j = await res.json();
-  if (!j.ok) {
+  let j = {};
+  try {
+    j = await res.json();
+  } catch (e) {}
+  if (!res.ok || !j.ok) {
     alert('Save failed');
     return;
   }
@@ -1287,7 +1427,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         updatePills(sc, scannerPills);
 
         const p1p = [{ txt: (s.ws_connected ? "WS connected" : "WS offline"), cls: (s.ws_connected ? "ok" : "bad") }];
-        if (s.awaiting) p1p.push({ txt: "Most recent scan - Job #" + s.job_id, cls: "warn" });
+        if (s.awaiting) p1p.push({ txt: "Most recent scan - Job #" + s.job_id, cls: "info" });
         if (s.last_decision) p1p.push({ txt: s.last_decision, cls: "ok" });
         const stacks = s.stacks || {};
         const rem = stacks.remaining_cards || [];
@@ -1403,7 +1543,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     // ensure it's visible even if it has the 'hidden' utility class
     modal.classList.remove('hidden');
     // show shared backdrop (same one used by filter/export)
-    document.getElementById('filter-backdrop')?.classList.remove('hidden');
+    openBackdrop();
     modal.classList.add("show"); modal.setAttribute("aria-hidden","false");
   }
   function closeEditModal() {
@@ -1412,11 +1552,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     modal.classList.add('hidden');                   // <-- important
     activeEditId = null;
     chosenScryId = null;
-    const f = document.getElementById('filter-modal');
-    const e = document.getElementById('export-modal');
-    if ((f?.classList.contains('hidden') ?? true) && (e?.classList.contains('hidden') ?? true)) {
-      document.getElementById('filter-backdrop')?.classList.add('hidden');
-    }
+    hideBackdropIfNone();
   }
   btnEdit?.addEventListener('click', (e)=>{ e.preventDefault(); if (currentLoadedId) openEditModal(); });
 
@@ -1431,6 +1567,14 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     } else {
       el.innerHTML = list.map(r => `<li>${esc(r)}</li>`).join("");
     }
+  }
+
+  function attachReprocessMagnifiers() {
+    attachMagnifier(reOldCmp, reOldCmp?.getAttribute("src") || "");
+    attachMagnifier(reNewCmp, reNewCmp?.getAttribute("src") || "");
+    document.querySelectorAll("#reprocessBatchList img").forEach(img => {
+      attachMagnifier(img, img.getAttribute("src") || "");
+    });
   }
   function fillReprocessColumns(oldData, newData) {
     const oldScore = typeof oldData?.match_score === "number" ? (Number(oldData.match_score)*100).toFixed(2) + "%" : "—";
@@ -1451,9 +1595,18 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     }
     renderReasons(reOldReasons, oldData?.review_reasons);
 
-    if (reNewName) reNewName.textContent = newData?.name || "(unnamed)";
-    if (reNewSet) reNewSet.textContent = (newData?.set_hint || "").toUpperCase() || "—";
-    if (reNewNumber) reNewNumber.textContent = newData?.number || "—";
+    if (reNewName) {
+      reNewName.value = newData?.name || "";
+      reNewName.setAttribute("placeholder", "(unnamed)");
+    }
+    if (reNewSet) {
+      reNewSet.value = (newData?.set_hint || "").toUpperCase();
+      reNewSet.setAttribute("placeholder", "Set code");
+    }
+    if (reNewNumber) {
+      reNewNumber.value = newData?.number || "";
+      reNewNumber.setAttribute("placeholder", "Collector #");
+    }
     if (reNewScore) reNewScore.textContent = newScore;
     if (reNewFlag) reNewFlag.textContent = newData?.flagged ? "Yes" : "No";
     if (reNewCmp) {
@@ -1486,7 +1639,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     reprocessProgressStop = startProgressRamp(reprocessProgressBar, 0.85, 0.008, 100);
     reprocessContent?.classList.add("hidden");
     reModal.classList.remove("hidden");
-    document.getElementById('filter-backdrop')?.classList.remove('hidden');
+    openBackdrop();
     reModal.classList.add("show");
     try {
       const data = await fetchWithFallback(
@@ -1498,6 +1651,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       }
       reprocessToken = data.token;
       fillReprocessColumns(data.old || {}, data.candidate || {});
+      attachReprocessMagnifiers();
       setReprocessStatus("Review the new detection and accept to overwrite.");
       reprocessContent?.classList.remove("hidden");
       reprocessApply?.removeAttribute("disabled");
@@ -1546,10 +1700,14 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     reprocessApply.setAttribute("disabled","disabled");
     setReprocessStatus("Applying new result…");
     try {
+      const override = {};
+      if (reNewName && reNewName.value.trim()) override.name = reNewName.value.trim();
+      if (reNewSet && reNewSet.value.trim()) override.set_hint = reNewSet.value.trim();
+      if (reNewNumber && reNewNumber.value.trim()) override.number = reNewNumber.value.trim();
       const res = await fetch(`/api/scan/${reprocessTargetId}/reprocess/apply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: reprocessToken })
+        body: JSON.stringify({ token: reprocessToken, override })
       });
       const data = await res.json();
       if (!data || !data.ok) {
@@ -1568,8 +1726,18 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
   function setBatchStatus(msg) {
     if (batchStatus) batchStatus.textContent = msg;
   }
+  function formatBatchCounts(flagged, failed) {
+    const parts = [];
+    if (typeof flagged === "number") parts.push(`${flagged} flagged`);
+    if (typeof failed === "number") parts.push(`${failed} failed`);
+    return parts.join(", ");
+  }
   function closeBatchModal() {
     if (!batchModal) return;
+    if (reprocessBatchJobId) {
+      fetch(`/api/reprocess/job/${reprocessBatchJobId}`, {method:'DELETE'}).catch(()=>{});
+      reprocessBatchJobId = null;
+    }
     batchModal.classList.remove("show");
     setTimeout(()=>batchModal.classList.add("hidden"), 50);
     reprocessBatchItems = [];
@@ -1579,7 +1747,6 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     }
     setBatchStatus("Preparing…");
     batchOverallProgressStop = stopIndeterminateBar(batchOverallProgressStop, batchOverallBar, 0);
-    batchCurrentProgressStop = stopIndeterminateBar(batchCurrentProgressStop, batchCurrentBar, 0);
     hideBackdropIfNone();
   }
   function renderBatchList() {
@@ -1611,9 +1778,22 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         }
         return nm || "—";
       })();
+      const scanImg = item.old?.thumb_url || item.old?.cmp_data_url || "";
+      const scryImg = item.candidate?.scry_image || item.candidate?.cmp_data_url || "";
+      const imageHtml = (scanImg || scryImg) ? `
+        <div class="reproc-batch-images">
+          <div class="img-slot">
+            ${scanImg ? `<span>Scan</span><img src="${esc(scanImg)}" alt="Scan #${item.id}">` : ""}
+          </div>
+          <div class="img-slot">
+            ${scryImg ? `<span>Scryfall</span><img src="${esc(scryImg)}" alt="Scryfall match for #${item.id}">` : ""}
+          </div>
+        </div>
+      ` : "";
       return `
         <div class="reproc-batch-item" data-token="${item.token}">
           <h4>#${item.id} ${oldName}</h4>
+          ${imageHtml}
           <div class="reproc-batch-columns">
             <div>
               <div class="reproc-field"><span>Current</span><strong>${oldName}</strong></div>
@@ -1623,10 +1803,10 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
               <ul class="reproc-reasons">${oldReasons}</ul>
             </div>
             <div>
-              <div class="reproc-field"><span>New OCR</span><strong>${newName}</strong></div>
+              <div class="reproc-field"><span>New OCR</span><input class="mm-input reproc-edit" data-token="${item.token}" data-edit="name" type="text" value="${newName}" aria-label="New name"></div>
               <div class="reproc-field sub"><span>Suggested</span><em>${esc(scryTxt)}</em></div>
-              <div class="reproc-field"><span>Set</span><strong>${newSet}</strong></div>
-              <div class="reproc-field"><span>Number</span><strong>${newNumber}</strong></div>
+              <div class="reproc-field"><span>Set</span><input class="mm-input reproc-edit" data-token="${item.token}" data-edit="set_hint" type="text" value="${newSet}" aria-label="New set code"></div>
+              <div class="reproc-field"><span>Number</span><input class="mm-input reproc-edit" data-token="${item.token}" data-edit="number" type="text" value="${newNumber}" aria-label="New collector number"></div>
               <div class="reproc-field"><span>Match</span><strong>${newScore}</strong></div>
               <ul class="reproc-reasons">${newReasons}</ul>
             </div>
@@ -1639,32 +1819,28 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       `;
     }).join("");
     batchList.innerHTML = html;
+    attachReprocessMagnifiers();
   }
   async function openBatchModal() {
     if (!batchModal) return;
-    document.getElementById('filter-backdrop')?.classList.remove('hidden');
+    openBackdrop();
     batchModal.classList.remove("hidden");
     batchModal.classList.add("show");
     setBatchStatus("Reprocessing review items…");
     setProgressBar(batchOverallBar, 0);
-    setProgressBar(batchCurrentBar, 0);
     batchOverallProgressStop = null;
-    batchCurrentProgressStop = null;
     batchList?.classList.add("hidden");
     reprocessBatchItems = [];
     try {
       let data = null;
-      let usedAsync = false;
       try {
         const res = await fetch('/api/reprocess/flagged?mode=async', {method:'POST'});
         data = await res.json();
-        usedAsync = !!(data && data.job);
       } catch (_err) {
         data = null;
       }
       if (!data || data.ok === false || (!data.job && !Array.isArray(data?.items))) {
         batchOverallProgressStop = startProgressRamp(batchOverallBar, 0.85, 0.0065, 160);
-        batchCurrentProgressStop = startProgressRamp(batchCurrentBar, 0.85, 0.008, 180);
         data = await fetchWithFallback(
           ['/api/reprocess/flagged?mode=sync', '/api/reprocess/flagged'],
           {method:'POST'}
@@ -1673,43 +1849,59 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       if (!data || !data.ok) {
         throw new Error((data && data.error) || "Unable to start batch");
       }
+      const flaggedCt = (typeof data.flagged === "number") ? data.flagged : null;
+      const failedCt  = (typeof data.failed === "number") ? data.failed : null;
+      const countsTxt = formatBatchCounts(flaggedCt, failedCt);
+      const totalQueued = typeof data.total === "number" ? data.total : (Array.isArray(data?.items) ? data.items.length : 0);
+      if (!totalQueued) {
+        setBatchStatus("No flagged or failed cards to reprocess.");
+        setProgressBar(batchOverallBar, 0);
+        return;
+      }
+      if (countsTxt) {
+        setBatchStatus(`Found ${totalQueued} cards (${countsTxt}). Starting…`);
+      } else {
+        setBatchStatus(`Found ${totalQueued} cards to reprocess. Starting…`);
+      }
       if (data.job) {
         const total = data.total || 0;
         const jobData = await pollReprocessJob(data.job, (status)=>{
           const totalCards = status?.total || total || 1;
           const done = Math.min(totalCards, status?.done || 0);
-          const cardFrac = (typeof status?.current_card_progress === "number") ? status.current_card_progress : 0;
-          const overall = (typeof status?.progress === "number")
-            ? status.progress
-            : (totalCards ? (done + cardFrac) / totalCards : 0);
+          const overall = totalCards ? (done / totalCards) : 1;
           setProgressBar(batchOverallBar, overall);
-          setProgressBar(batchCurrentBar, cardFrac);
           const phase = status?.current_phase ? String(status.current_phase).replace(/_/g," ") : "";
           const currentLabel = status?.current_card ? `Card #${status.current_card}` : "";
-          setBatchStatus(`Processing ${done}/${totalCards} ${currentLabel} ${phase}`.trim());
-        });
+          const countsLabel = formatBatchCounts(
+            typeof status?.flagged === "number" ? status.flagged : flaggedCt,
+            typeof status?.failed === "number" ? status.failed : failedCt
+          );
+          const base = `Processing ${done}/${totalCards}`;
+          const withCounts = countsLabel ? `${base} (${countsLabel})` : base;
+          setBatchStatus(`${withCounts} ${currentLabel} ${phase}`.trim());
+        }, 250);
         reprocessBatchItems = Array.isArray(jobData?.items) ? jobData.items : [];
       } else {
         // synchronous fallback - use ramp to hint activity
         batchOverallProgressStop = startProgressRamp(batchOverallBar, 0.85, 0.0065, 160);
-        batchCurrentProgressStop = startProgressRamp(batchCurrentBar, 0.85, 0.008, 180);
         reprocessBatchItems = Array.isArray(data.items) ? data.items : [];
       }
+      reprocessBatchJobId = data.job || null;
       if (!reprocessBatchItems.length) {
         setBatchStatus("No review items require reprocessing.");
       } else {
-        setBatchStatus(`Review ${reprocessBatchItems.length} updated card${reprocessBatchItems.length === 1 ? "" : "s"}.`);
+        const counts = formatBatchCounts(flaggedCt, failedCt);
+        const reviewLabel = `Review ${reprocessBatchItems.length} updated card${reprocessBatchItems.length === 1 ? "" : "s"}.`;
+        setBatchStatus(counts ? `${reviewLabel} (${counts})` : reviewLabel);
       }
       renderBatchList();
       setProgressBar(batchOverallBar, 1);
-      setProgressBar(batchCurrentBar, 0);
     } catch (err) {
       setBatchStatus("Batch reprocess failed: " + err.message);
       setProgressBar(batchOverallBar, 0);
-      setProgressBar(batchCurrentBar, 0);
     } finally {
       batchOverallProgressStop = stopIndeterminateBar(batchOverallProgressStop, null);
-      batchCurrentProgressStop = stopIndeterminateBar(batchCurrentProgressStop, null);
+      reprocessBatchJobId = null;
     }
   }
   btnReprocessBatch?.addEventListener("click", (e)=>{
@@ -1740,10 +1932,18 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       try {
         const item = reprocessBatchItems.find(it => it.token === token);
         if (!item) throw new Error("Token expired");
+        const cardEl = btn.closest("[data-token]");
+        const override = {};
+        const nameInput = cardEl?.querySelector('[data-edit="name"]');
+        const setInput = cardEl?.querySelector('[data-edit="set_hint"]');
+        const numInput = cardEl?.querySelector('[data-edit="number"]');
+        if (nameInput && nameInput.value.trim()) override.name = nameInput.value.trim();
+        if (setInput && setInput.value.trim()) override.set_hint = setInput.value.trim();
+        if (numInput && numInput.value.trim()) override.number = numInput.value.trim();
         const res = await fetch(`/api/scan/${item.id}/reprocess/apply`, {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({token})
+          body: JSON.stringify({token, override})
         });
         const data = await res.json();
         if (!data || !data.ok) throw new Error((data && data.error) || "Apply failed");
@@ -1759,6 +1959,170 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     }
   });
 
+  // ---- Quarantine Recovery ----
+  function setQuarantineStatus(msg) {
+    if (qStatusText) qStatusText.textContent = msg || "";
+  }
+  function fillQuarantineForm(item) {
+    activeQuarantineId = item?.id || null;
+    if (!item) {
+      if (qId) qId.value = "";
+      if (qName) qName.value = "";
+      if (qSet) qSet.value = "";
+      if (qNumber) qNumber.value = "";
+      if (qStatus) qStatus.value = "pass";
+      if (qMatch) qMatch.value = "";
+      if (qFlagged) qFlagged.value = "false";
+      if (qReasons) qReasons.value = "";
+      setQuarantineStatus("");
+      return;
+    }
+    if (qId) qId.value = item.id ?? "";
+    if (qName) qName.value = item.meta?.name || "";
+    if (qSet) qSet.value = (item.meta?.set_hint || "").toUpperCase();
+    if (qNumber) qNumber.value = item.meta?.number || "";
+    if (qStatus) qStatus.value = (item.meta?.status || "pass");
+    if (qMatch) qMatch.value = (typeof item.meta?.match_score === "number") ? item.meta.match_score : "";
+    if (qFlagged) qFlagged.value = item.meta?.flagged ? "true" : "false";
+    if (qReasons) qReasons.value = Array.isArray(item.meta?.review_reasons) ? item.meta.review_reasons.join("\n") : "";
+    setQuarantineStatus(item.parse_ok ? "Parsed ok. Edit or auto-fix to restore." : "Parse failed. Try auto-fix or edit fields then save.");
+  }
+  function renderQuarantineList() {
+    if (!quarantineList) return;
+    if (!quarantineItems.length) {
+      quarantineList.innerHTML = '<div class="quarantine-item"><strong>No quarantined files.</strong></div>';
+      fillQuarantineForm(null);
+      return;
+    }
+    const html = quarantineItems.map(item => {
+      const cls = item.id === activeQuarantineId ? "quarantine-item active" : "quarantine-item";
+      const name = esc(item.meta?.name || "(unnamed)");
+      const setTxt = esc((item.meta?.set_hint || "").toUpperCase());
+      const num = esc(item.meta?.number || "");
+      const status = esc(item.meta?.status || "");
+      return `<div class="${cls}" data-qid="${item.id}">
+        <h4>#${item.id} ${name}</h4>
+        <div class="meta">${setTxt} ${num}</div>
+        <div class="meta">Reason: ${esc(item.reason || "unknown")} • Status: ${status || "?"}</div>
+      </div>`;
+    }).join("");
+    quarantineList.innerHTML = html;
+  }
+  async function loadQuarantineList() {
+    try {
+      const res = await fetch('/api/history/quarantine');
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || "Unable to load quarantine");
+      quarantineItems = Array.isArray(data.items) ? data.items : [];
+      if (quarantineItems.length) {
+        activeQuarantineId = quarantineItems[0].id;
+        renderQuarantineList();
+        fillQuarantineForm(quarantineItems[0]);
+      } else {
+        renderQuarantineList();
+        fillQuarantineForm(null);
+      }
+    } catch (err) {
+      setQuarantineStatus("Load failed: " + err.message);
+    }
+  }
+  function openQuarantineModal() {
+    if (!quarantineModal) return;
+    openBackdrop();
+    quarantineModal.classList.remove("hidden");
+    quarantineModal.setAttribute("aria-hidden","false");
+    loadQuarantineList();
+  }
+  function closeQuarantineModal() {
+    if (!quarantineModal) return;
+    quarantineModal.classList.add("hidden");
+    quarantineModal.setAttribute("aria-hidden","true");
+    activeQuarantineId = null;
+    setQuarantineStatus("");
+    hideBackdropIfNone();
+  }
+  quarantineList?.addEventListener("click", (e)=>{
+    const card = e.target.closest("[data-qid]");
+    if (!card) return;
+    const id = Number(card.getAttribute("data-qid"));
+    const item = quarantineItems.find(it => Number(it.id) === id);
+    if (item) {
+      activeQuarantineId = id;
+      renderQuarantineList();
+      fillQuarantineForm(item);
+    }
+  });
+  btnQuarantine?.addEventListener("click", (e)=>{ e.preventDefault(); openQuarantineModal(); });
+  quarantineClose?.addEventListener("click", closeQuarantineModal);
+  qAutoFix?.addEventListener("click", async ()=>{
+    if (!activeQuarantineId) return;
+    setQuarantineStatus("Auto-fixing…");
+    try {
+      const res = await fetch(`/api/history/quarantine/${activeQuarantineId}/autofix`, {method:'POST'});
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || "Auto-fix failed");
+      quarantineItems = quarantineItems.filter(it => it.id !== activeQuarantineId);
+      renderQuarantineList();
+      fillQuarantineForm(quarantineItems[0] || null);
+      fetchScans();
+      fetchState();
+      try { refreshHistoryGrid(); } catch {}
+      setQuarantineStatus("Restored successfully.");
+    } catch (err) {
+      setQuarantineStatus("Auto-fix failed: " + err.message);
+    }
+  });
+  qSave?.addEventListener("click", async ()=>{
+    if (!activeQuarantineId) return;
+    setQuarantineStatus("Saving…");
+    const body = {
+      entry: {
+        name: qName?.value || "",
+        set_hint: (qSet?.value || "").toLowerCase(),
+        number: qNumber?.value || "",
+        status: qStatus?.value || "pass",
+        match_score: qMatch?.value ? Number(qMatch.value) : null,
+        flagged: (qFlagged?.value === "true"),
+        review_reasons: qReasons?.value ? qReasons.value.split("\n").map(s=>s.trim()).filter(Boolean) : [],
+        match_ok: (qStatus?.value === "pass"),
+      }
+    };
+    try {
+      const res = await fetch(`/api/history/quarantine/${activeQuarantineId}/save`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
+      quarantineItems = quarantineItems.filter(it => it.id !== activeQuarantineId);
+      renderQuarantineList();
+      fillQuarantineForm(quarantineItems[0] || null);
+      fetchScans();
+      fetchState();
+      try { refreshHistoryGrid(); } catch {}
+      setQuarantineStatus("Restored successfully.");
+    } catch (err) {
+      setQuarantineStatus("Save failed: " + err.message);
+    }
+  });
+  qDelete?.addEventListener("click", async ()=>{
+    if (!activeQuarantineId) return;
+    if (!confirm("Delete quarantined files for card #" + activeQuarantineId + "?")) return;
+    setQuarantineStatus("Deleting…");
+    try {
+      const res = await fetch(`/api/history/quarantine/${activeQuarantineId}`, {method:'DELETE'});
+      const data = await res.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || "Delete failed");
+      quarantineItems = quarantineItems.filter(it => it.id !== activeQuarantineId);
+      renderQuarantineList();
+      fillQuarantineForm(quarantineItems[0] || null);
+      setQuarantineStatus("Deleted.");
+    } catch (err) {
+      setQuarantineStatus("Delete failed: " + err.message);
+    }
+  });
+
   // ---- All History (fullscreen grid) ----
   function ensureHistoryModals() {
     if (!document.getElementById('history-modal')) {
@@ -1768,7 +2132,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         style="position:fixed;top:20px;bottom:20px;left:50%;transform:translate(-50%,0);width:min(1200px,calc(100vw - 40px));max-width:calc(100vw - 40px);height:calc(100vh - 40px);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;z-index:100;">
         <div class="mm-modal__header" style="position:sticky;top:0;z-index:1;">
           <div class="mm-title">All History</div><button class="btn btn-pill" id="history-filter">Filters…</button>
-          <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
+          <button class="btn btn-pill btn-ghost" id="history-close">Close</button>
         </div>
         <div class="mm-modal__body" style="flex:1 1 auto;min-height:0;overflow:auto;padding:16px;">
           <div id="history-grid" class="history-grid history-grid-inline" aria-label="All history grid"></div>
@@ -1777,7 +2141,7 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
       <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px;z-index:120;" aria-hidden="true">
         <div class="mm-modal__header">
           <div class="mm-title">Choose Action</div>
-          <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
+          <button class="btn btn-pill btn-ghost" id="histopt-close">Close</button>
         </div>
         <div class="mm-modal__body">
           <div class="mm-grid" style="grid-template-columns: 1fr;">
@@ -1799,18 +2163,81 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
   let histSelectedId = null;
   function openBackdrop() { filterBackdrop?.classList.remove("hidden"); }
   function _anyModalOpen() {
-    // Treat both legacy `.modal.show` dialogs and newer `.mm-modal` sheets as “open”.
-    const ids = ["filter-modal","export-modal","export-modal-txt","export-modal-csv","printer-modal","settings-modal","history-modal","history-options-modal","reprocessModal","reprocessBatchModal"];
-    const idOpen = ids
-      .map(id=>document.getElementById(id))
-      .some(el => el && !el.classList.contains("hidden"));
-    if (idOpen) return true;
-    // Fallback: scan for any modal currently shown that might have been missed by the ID list.
-    return !!document.querySelector(".modal.show:not(.hidden), .mm-modal:not(.hidden)");
+    // Detect any visible modal (legacy .modal or newer .mm-modal)
+    const selector = ".mm-modal:not(.hidden):not([aria-hidden=\"true\"]), .modal.show:not(.hidden):not([aria-hidden=\"true\"]), .modal:not(.hidden)[aria-modal=\"true\"]";
+    return !!document.querySelector(selector);
   }
   function hideBackdropIfNone() {
-    if (!_anyModalOpen()) {
-      filterBackdrop?.classList.add("hidden");
+    requestAnimationFrame(()=>{ if (!_anyModalOpen()) filterBackdrop?.classList.add("hidden"); });
+  }
+  function closeHistoryModal() {
+    const modal = document.getElementById("history-modal");
+    const opts = document.getElementById("history-options-modal");
+    modal?.classList.add("hidden");
+    opts?.classList.add("hidden");
+    hideBackdropIfNone();
+  }
+
+  function openBackupModal() {
+    if (!backupModal) return;
+    openBackdrop();
+    backupModal.classList.remove("hidden");
+    backupModal.setAttribute("aria-hidden", "false");
+    if (backupExportStatus) backupExportStatus.textContent = "";
+    if (backupImportStatus) backupImportStatus.textContent = "";
+  }
+  function closeBackupModal() {
+    if (!backupModal) return;
+    backupModal.classList.add("hidden");
+    backupModal.setAttribute("aria-hidden", "true");
+    hideBackdropIfNone();
+  }
+
+  async function runBackupExport() {
+    if (!backupExportStatus) return;
+    backupExportStatus.textContent = "Exporting…";
+    try {
+      const res = await fetch("/api/history/export/full", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ compact: !!backupCompact?.checked, compact_images: !!backupCompact?.checked })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Export failed");
+      }
+      backupExportStatus.textContent = `Export ready (${data.count || 0} items). Downloading…`;
+      if (data.url) {
+        window.location.href = data.url;
+      }
+    } catch (err) {
+      backupExportStatus.textContent = `Export failed: ${err.message}`;
+    }
+  }
+
+  async function runBackupImport() {
+    if (!backupImportStatus) return;
+    const file = backupFile?.files?.[0];
+    if (!file) {
+      backupImportStatus.textContent = "Choose a .tar.gz file to import.";
+      return;
+    }
+    backupImportStatus.textContent = "Importing…";
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("mode", backupMode?.value || "replace");
+      fd.append("reassign_on_conflict", backupReassign?.checked ? "true" : "false");
+      const res = await fetch("/api/history/import", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Import failed");
+      }
+      backupImportStatus.textContent = `Imported ${data.imported || 0} items (${data.mode}).`;
+      fetchScans();
+      try { refreshHistoryGrid(); } catch (e) {}
+    } catch (err) {
+      backupImportStatus.textContent = `Import failed: ${err.message}`;
     }
   }
 
@@ -1915,10 +2342,7 @@ function openHistoryModal() {
       hfBtn._bound = true;
     }
 if (!closeBtn._boundClose) {
-      closeBtn.addEventListener("click", function(){
-        modal?.classList.add("hidden");
-        hideBackdropIfNone();
-      });
+      closeBtn.addEventListener("click", closeHistoryModal);
       closeBtn._boundClose = true;
     }
     openBackdrop();
@@ -2100,46 +2524,122 @@ if (!closeBtn._boundClose) {
   // ===== Export CSV dialog =====
 const exportModal = document.getElementById('export-modal');
 const exportClose = document.getElementById('export-close');
+let exportCardSphereMode = false;
 function openExport(){ 
   // build checkboxes each time (so default states reset nicely)
   buildExportCheckboxes();
-  document.getElementById('filter-backdrop')?.classList.remove('hidden');
+  openBackdrop();
   exportModal?.classList.remove('hidden'); 
   exportModal?.setAttribute('aria-hidden','false');
 }
 function closeExport(){ 
   exportModal?.classList.add('hidden'); 
   exportModal?.setAttribute('aria-hidden','true');
-  document.getElementById('filter-backdrop')?.classList.add('hidden');
+  hideBackdropIfNone();
 }
 exportClose?.addEventListener('click', closeExport);
 
-// Archidekt-like field set
-const ALL_FIELDS = [
-  "Quantity","Name","Finish","Condition","Date Added","Language","Purchase Price","Tags",
+// Export field sets
+const CARDSPHERE_FIELDS = ["Name","Set","Quantity","Foil","Condition","Language"];
+const BASE_FIELDS = [
+  "Quantity","Name","Foil","Condition","Date Added","Language","Purchase Price","Tags",
   "Edition Name","Edition Code","Multiverse Id","Scryfall ID","MTGO ID",
   "Collector Number","Mana Value","Colors","Identities","Mana cost",
   "Types","Sub-types","Super-types","Rarity",
   "Price (Card Kingdom)","Price (TCG Player)","Price (Star City Games)","Price (Card Hoarder)","Price (Card Market)",
   "Scryfall Oracle ID"
 ];
+const ALL_FIELDS = [...new Set([...BASE_FIELDS, ...CARDSPHERE_FIELDS])];
 const DEFAULT_FIELDS = [
-  "Quantity","Name","Finish","Condition","Date Added","Language",
+  "Quantity","Name","Foil","Condition","Date Added","Language",
   "Edition Name","Edition Code","Collector Number",
   "Scryfall ID","Scryfall Oracle ID",
   "Mana Value","Identities","Mana cost","Types","Sub-types","Super-types","Rarity"
 ];
+let exportFieldOrder = DEFAULT_FIELDS.slice();
+
+// Example row (all fields) to preview the CSV output dynamically.
+const EXPORT_EXAMPLE_VALUES = {
+  "Quantity": "1",
+  "Name": "Kithkin Billyrider",
+  "Foil": "false",
+  "Condition": "NM",
+  "Conditions": "NM",
+  "Date Added": "2025-12-07",
+  "Language": "English",
+  "Languages": "EN",
+  "Purchase Price": "0.15",
+  "Tags": "bulk",
+  "Set": "MOM",
+  "Edition Name": "March of the Machine",
+  "Edition Code": "MOM",
+  "Multiverse Id": "607041",
+  "Scryfall ID": "0535b69f-247d-49c9-97e1-d988700578ab",
+  "MTGO ID": "109854",
+  "Collector Number": "24",
+  "Mana Value": "3.0",
+  "Colors": "W",
+  "Identities": "W",
+  "Mana cost": "{2}{W}",
+  "Types": "Creature",
+  "Sub-types": "Kithkin Knight",
+  "Super-types": "None",
+  "Rarity": "Common",
+  "Price (Card Kingdom)": "0.05",
+  "Price (TCG Player)": "0.04",
+  "Price (Star City Games)": "0.04",
+  "Price (Card Hoarder)": "0.03",
+  "Price (Card Market)": "0.12",
+  "Scryfall Oracle ID": "142d2063-d692-42a6-b828-42d998914589"
+};
+const exportExampleBox = document.getElementById('export-example');
+const exportExampleText = document.getElementById('export-example-text');
 
 function buildExportCheckboxes(){
   const wrap = document.getElementById('export-field-list');
   if (!wrap) return;
+  exportCardSphereMode = false;
   wrap.innerHTML = ALL_FIELDS.map(h =>
     `<label class="mm-check"><input type="checkbox" data-f="${h}" ${DEFAULT_FIELDS.includes(h)?'checked':''}> ${h}</label>`
   ).join('');
+  exportFieldOrder = DEFAULT_FIELDS.slice();
+  bindExportCheckboxListeners();
+  renderExportExample();
+}
+function setExportFields(fields){
+  exportCardSphereMode = fields.length === CARDSPHERE_FIELDS.length && fields.every((f, i) => CARDSPHERE_FIELDS[i] === f);
+  exportFieldOrder = fields.slice();
+  document.querySelectorAll('#export-field-list input[type=checkbox]').forEach(cb => {
+    cb.checked = fields.includes(cb.dataset.f);
+  });
+  renderExportExample();
 }
 function selectedFields(){
-  return Array.from(document.querySelectorAll('#export-field-list input[type=checkbox]'))
+  const checked = Array.from(document.querySelectorAll('#export-field-list input[type=checkbox]'))
     .filter(cb => cb.checked).map(cb => cb.dataset.f);
+  if (exportFieldOrder && exportFieldOrder.length) {
+    const ordered = exportFieldOrder.filter(f => checked.includes(f));
+    const extras = checked.filter(f => !exportFieldOrder.includes(f));
+    return ordered.concat(extras);
+  }
+  return checked;
+}
+function bindExportCheckboxListeners(){
+  document.querySelectorAll('#export-field-list input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', renderExportExample);
+  });
+}
+function renderExportExample(){
+  if (!exportExampleText) return;
+  const fields = selectedFields();
+  if (!fields.length) {
+    exportExampleText.textContent = 'Select at least one field to preview the CSV row.';
+    exportExampleBox?.classList.add('muted');
+    return;
+  }
+  exportExampleBox?.classList.remove('muted');
+  const row = fields.map(f => (EXPORT_EXAMPLE_VALUES[f] ?? "")).join(',');
+  exportExampleText.textContent = row;
 }
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -2166,13 +2666,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
 // modal buttons
-document.getElementById('export-selectall')?.addEventListener('click', ()=>{
-  document.querySelectorAll('#export-field-list input[type=checkbox]').forEach(cb => cb.checked = true);
-});
-document.getElementById('export-clear')?.addEventListener('click', ()=>{
-  document.querySelectorAll('#export-field-list input[type=checkbox]').forEach(cb => cb.checked = false);
-});
-document.getElementById('export-defaults')?.addEventListener('click', buildExportCheckboxes);
+document.getElementById('export-selectall')?.addEventListener('click', ()=> setExportFields(ALL_FIELDS));
+document.getElementById('export-clear')?.addEventListener('click', ()=> setExportFields([]));
+document.getElementById('export-defaults')?.addEventListener('click', ()=> setExportFields(DEFAULT_FIELDS));
+document.getElementById('export-cardsphere')?.addEventListener('click', ()=> setExportFields(CARDSPHERE_FIELDS));
 
 // open modal from toolbar button
 document.getElementById('btn-export-csv')?.addEventListener('click', openExport);
@@ -2183,10 +2680,17 @@ document.getElementById('export-go')?.addEventListener('click', ()=>{
   const qs = new URLSearchParams(historyQueryQS || buildHistoryQuery());
   qs.set('fmt','csv');
   if (fields.length) qs.set('fields', fields.join(','));
+  if (exportCardSphereMode) qs.set('cardsphere_import','1');
   // NOTE: we export using whatever filters are set; decklist export still forces pass-only
   window.location.href = '/api/scans/export/download?' + qs.toString();
   closeExport();
 });
+
+// Backup/restore
+btnBackup?.addEventListener('click', openBackupModal);
+backupClose?.addEventListener('click', closeBackupModal);
+backupExport?.addEventListener('click', runBackupExport);
+backupImport?.addEventListener('click', runBackupImport);
 
   // ---------- boot ----------
   function boot() {
@@ -2202,40 +2706,6 @@ document.getElementById('export-go')?.addEventListener('click', ()=>{
   const sh = document.getElementById("showbad");
   if (sh) sh.onclick = function (e) { e.preventDefault(); fetchBad(); };
 })();
-
-
-document.getElementById('btnMeasureDeck')?.addEventListener('click', async () => {
-  try {
-    const script = `_RAISE_TO_TRAVEL
-SET_START_HEIGHT_OK`;
-    const r = await fetch('/api/printer/gcode', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({script})
-    });
-    const d = await r.json();
-    if (d?.ok) log('t', 'Measuring START height…');
-    else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
-  } catch {}
-});
-
-
-
-document.getElementById('btnMeasureDeck')?.addEventListener('click', async () => {
-  try {
-    const body = { name: 'SET_START_HEIGHT' };
-    const r = await fetch('/api/printer/macro', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)
-    });
-    const d = await r.json();
-    if (d?.ok) log('t', 'Measuring START height…');
-    else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
-  } catch {}
-});
-
-
 
 // ===== Simple macro wiring (override via capture) =====
 (function(){
@@ -2257,18 +2727,6 @@ document.getElementById('btnMeasureDeck')?.addEventListener('click', async () =>
       else log('t', 'Home failed: ' + (d?.error || 'unknown'));
     }, true); // capture
   }
-
-  // MEASURE -> SET_START_HEIGHT_OK
-  const measureBtn = document.getElementById('btnMeasureDeck');
-  if (measureBtn) {
-    measureBtn.addEventListener('click', async (e) => {
-      e.stopImmediatePropagation(); e.preventDefault();
-      const d = await sendMacro('SET_START_HEIGHT_OK');
-      if (d?.ok) log('t', 'SET_START_HEIGHT_OK sent');
-      else log('t', 'Measure failed: ' + (d?.error || 'unknown'));
-    }, true); // capture
-  }
-
   // START -> modal (COUNT only) -> RUN_SORTER_INTERACTIVE
   const startBtn = document.getElementById('btnStartRun');
   const startModal = document.getElementById('start-modal');
@@ -2485,7 +2943,7 @@ document.getElementById('btnMeasureDeck')?.addEventListener('click', async () =>
   document.getElementById('printer-estop')?.addEventListener('click', (e)=>{ e.preventDefault(); e.stopImmediatePropagation(); doEstop(); });
   if (!window.estop) { window.estop = doEstop; }
 })();
-  async function pollReprocessJob(jobId, onUpdate) {
+  async function pollReprocessJob(jobId, onUpdate, intervalMs=600) {
     if (!jobId) throw new Error("job missing");
     while (true) {
       const res = await fetch(`/api/reprocess/job/${jobId}?ts=${Date.now()}`);
@@ -2494,6 +2952,6 @@ document.getElementById('btnMeasureDeck')?.addEventListener('click', async () =>
       onUpdate?.(data);
       if (data.status === "done") return data;
       if (data.status === "error") throw new Error(data.error || "Job failed");
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, intervalMs));
     }
   }
