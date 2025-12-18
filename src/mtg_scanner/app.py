@@ -6080,6 +6080,9 @@ def _draw_ai_overlay(img):
         except Exception:
             pass
 
+    if not bool(globals().get("AI_DRAW_LEGEND", True)):
+        return
+
     # legend with dynamic spacing
     x, y = pad, pad
     legend = [("name","1-Name"),("mana_value","2-Mana Value"),
@@ -7633,6 +7636,25 @@ def api_state():
     state["ocr_foil"] = ocr_snap.get("foil")
     state["ocr_foil_score"] = ocr_snap.get("foil_score")
 
+    # Recent throughput (cards/hour based on last 60 seconds of scans)
+    try:
+        now = time.time()
+        window = max(1.0, float(globals().get("CARDS_PER_H_WINDOW_SEC", 60.0)))
+        cutoff = now - window
+        recent = 0
+        with history_lock:
+            for e in scan_history:
+                ts = float(e.get("ts") or 0.0)
+                if ts < cutoff:
+                    break  # entries are newest-first
+                recent += 1
+        factor = 3600.0 / window
+        state["cards_per_hour"] = int(round(recent * factor))
+        state["cards_per_min"] = float(recent * (60.0 / window))
+    except Exception:
+        state.setdefault("cards_per_hour", 0)
+        state.setdefault("cards_per_min", 0.0)
+
     state.update({
         "stream": dict(STREAM_STATE),
         "snapshot_present": snap_present,
@@ -8060,8 +8082,14 @@ def api_scans_export_download():
             "ko": "Korean", "ru": "Russian", "zhs": "Chinese (Simplified)",
             "zht": "Chinese (Traditional)"
         }
+        condition_override = (a.get("condition") or a.get("cond") or a.get("export_condition") or "").strip()
+        lang_override_raw   = (a.get("language") or a.get("lang") or a.get("export_language") or "").strip()
+
         def _lang_val(ag, for_cardsphere=False):
             val = (_get(ag, "lang") or "en").strip()
+            if lang_override_raw:
+                # Honor user override exactly (keep short codes uppercase)
+                return lang_override_raw.upper() if len(lang_override_raw) <= 3 else lang_override_raw
             if for_cardsphere:
                 return LANG_MAP.get(val.lower(), "English")
             return val.upper()
@@ -8076,6 +8104,28 @@ def api_scans_export_download():
                 if vl == name.lower():
                     return name
             return ""
+
+        def _cond_val(for_cardsphere=False):
+            if condition_override:
+                return condition_override
+            return "" if for_cardsphere else "NM"
+
+        def _export_name(ag):
+            """
+            Use the front-face name for any multi-face card and drop Summon prefixes so CardSphere can match.
+            """
+            nm = (ag.get("name") or "").strip()
+            scry = ag.get("scry") or {}
+            faces = scry.get("card_faces") or []
+            if faces:
+                front = (faces[0].get("name") or "").strip()
+                if front:
+                    nm = front
+            if " // " in nm:
+                nm = nm.split(" // ", 1)[0].strip() or nm
+            if nm.lower().startswith("summon:"):
+                nm = nm.split(":", 1)[1].strip()
+            return nm or (ag.get("name") or "")
 
         def _price(ag, which):
             try:
@@ -8101,10 +8151,10 @@ def api_scans_export_download():
         # canonical field -> value function
         FIELD_FNS = OrderedDict([
             ("Quantity",             lambda ag: ag["count"]),
-            ("Name",                 lambda ag: ag["name"]),
+            ("Name",                 lambda ag: _export_name(ag)),
             ("Foil",                 lambda ag: "true" if ag["foil"] else "false"),
-            ("Condition",            lambda ag: "NM"),
-            ("Conditions",           lambda ag: "NM"),
+            ("Condition",            lambda ag: _cond_val()),
+            ("Conditions",           lambda ag: _cond_val()),
             ("Date Added",           lambda ag: time.strftime("%Y-%m-%d", time.localtime(ag["first_ts"])) if ag["first_ts"] else ""),
             ("Language",             lambda ag: _lang_val(ag)),
             ("Languages",            lambda ag: _lang_val(ag)),
@@ -8186,11 +8236,13 @@ def api_scans_export_download():
             w.writerow(user_fields)
             for key in sorted(aggs.keys()):
                 ag = aggs[key]
-                foil_val = "true" if ag["foil"] else ""
-                cond_val = ""
+                foil_val = "foil" if ag["foil"] else ""
+                cond_val = _cond_val(for_cardsphere=True)
                 lang_val = ""  # let Cardsphere importer apply its own defaults
+                if lang_override_raw:
+                    lang_val = _lang_val(ag, for_cardsphere=True)
                 row = [
-                    ag["name"],
+                    _export_name(ag),
                     ag["setc"],
                     int(ag["count"] or 0),
                     foil_val,
@@ -8943,7 +8995,32 @@ def _run_reprocess_on_entry(entry, progress_cb=None):
             if progress_cb:
                 progress_cb("no_snapshot", 1.0)
             perf_status = "no_snapshot"
-            return None
+            ocr_existing = entry.get("ocr") or {}
+            def _ocr_field(key, fallback=""):
+                return ocr_existing.get(key) or entry.get(key, fallback)
+            return {
+                "ocr": {
+                    "name": _ocr_field("name"),
+                    "name_raw": ocr_existing.get("name_raw") or entry.get("name",""),
+                    "number": _ocr_field("number"),
+                    "number_raw": _ocr_field("number_raw"),
+                    "set_hint": (ocr_existing.get("set_hint") or entry.get("set_hint") or "").lower(),
+                    "foil": bool(ocr_existing.get("foil", entry.get("foil", False))),
+                    "foil_score": float(ocr_existing.get("foil_score", entry.get("foil_score", 0.0))),
+                },
+                "scry": entry.get("scry") or {},
+                "match_score": entry.get("match_score", 0.0),
+                "match_ok": entry.get("match_ok"),
+                "flagged": entry.get("flagged", False),
+                "status": entry.get("status", "review"),
+                "review_level": entry.get("review_level"),
+                "review_reasons": entry.get("review_reasons", []),
+                "auto_name_fix": entry.get("auto_name_fix", False),
+                "inputs_present": entry.get("inputs_present", {}),
+                "cmp_stats": _cmp_stats_sanitized(entry.get("cmp_stats") or {}),
+                "cmp_jpg": entry.get("cmp_jpg"),
+                "cmp_details": None,
+            }
         # Optional downscale for faster OCR
         try:
             maxw = int(globals().get("REPROCESS_MAX_WIDTH", 0) or 0)
@@ -10835,11 +10912,16 @@ except Exception:
 
 
 if __name__ == "__main__":
-    HOST = str(globals().get("APP_HOST", os.environ.get("APP_HOST", "0.0.0.0")))
-    PORT = int(globals().get("APP_PORT", os.environ.get("APP_PORT", 5000)))
+    # Respect configured HOST/PORT, but allow legacy APP_HOST/APP_PORT env overrides.
+    host = os.environ.get("APP_HOST") or globals().get("HOST", "0.0.0.0")
+    port = os.environ.get("APP_PORT") or globals().get("PORT", 5000)
+    try:
+        port = int(port)
+    except Exception:
+        port = 5000
     try:
         signal.signal(signal.SIGINT,  lambda *_: threading.Thread(target=_graceful_shutdown, daemon=True).start())
         signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=_graceful_shutdown, daemon=True).start())
     except Exception:
         pass
-    run_server(HOST, PORT)
+    run_server(str(host), int(port))

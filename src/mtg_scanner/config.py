@@ -82,6 +82,8 @@ CARD_CROP_LIVE = _get("CARD_CROP_LIVE", True, bool)
 QUAD_STICKY_PX = _get("QUAD_STICKY_PX", 0.9, float)
 QUAD_SMOOTH_MIN_ALPHA = _get("QUAD_SMOOTH_MIN_ALPHA", 0.28, float)
 QUAD_SMOOTH_MAX_ALPHA = _get("QUAD_SMOOTH_MAX_ALPHA", 0.72, float)
+QUAD_FREEZE_THRESH = _get("QUAD_FREEZE_THRESH", 1.6, float)
+QUAD_BLEND_THRESH  = _get("QUAD_BLEND_THRESH", 4.2, float)
 CARD_RING_OUTSIDE_MIN_FRAC = _get("CARD_RING_OUTSIDE_MIN_FRAC", 0.18, float)
 MANUAL_CROP_ENABLED = _get("MANUAL_CROP_ENABLED", True, bool)
 MANUAL_CROP_QUAD = _get("MANUAL_CROP_QUAD",
@@ -120,6 +122,7 @@ SET_OCR_BUDGET_S = _get("SET_OCR_BUDGET_S", 4.0, float)  # cap time spent on set
 # =========================
 # OCR FAST-PATH TOGGLES (easy to remove)
 # =========================
+OCR_USE_TESSERACT = _get("OCR_USE_TESSERACT", True, bool)
 OCR_FAST_PATH = _get("OCR_FAST_PATH", True, bool)
 OCR_LAZY_SET_HINT = _get("OCR_LAZY_SET_HINT", True, bool)
 OCR_TITLE_SINGLE_PASS = _get("OCR_TITLE_SINGLE_PASS", True, bool)
@@ -136,6 +139,14 @@ FOIL_MIN_SCORE = _get("FOIL_MIN_SCORE", 1.25, float)
 FOIL_ON_TH     = _get("FOIL_ON_TH",  1.25, float)
 FOIL_OFF_TH    = _get("FOIL_OFF_TH", 1.00, float)
 FOIL_DETECT    = _get("FOIL_DETECT", 1, bool)
+FOIL_SPEC_VAL_THRESHOLD = _get("FOIL_SPEC_VAL_THRESHOLD", 212, int)
+FOIL_SPEC_SAT_THRESHOLD = _get("FOIL_SPEC_SAT_THRESHOLD", 88, int)
+FOIL_SPEC_DILATE        = _get("FOIL_SPEC_DILATE", 3, int)
+FOIL_CLAHE_CLIP         = _get("FOIL_CLAHE_CLIP", 3.8, float)
+FOIL_CLAHE_TILE         = _get("FOIL_CLAHE_TILE", 8, int)
+FOIL_SAT_SCALE          = _get("FOIL_SAT_SCALE", 0.55, float)
+FOIL_GAMMA              = _get("FOIL_GAMMA", 0.92, float)
+FOIL_UNSHARP_AMOUNT     = _get("FOIL_UNSHARP_AMOUNT", 0.32, float)
 
 # =========================
 # MATCH / COMPARISON
@@ -150,6 +161,7 @@ ALWAYS_SCAN_OK = _get("ALWAYS_SCAN_OK", 1, bool)
 MATCH_USE_ART  = _get("MATCH_USE_ART", 1, bool)
 MATCH_REQUIRE_ORB = _get("MATCH_REQUIRE_ORB", 1, bool)
 MATCH_ORB_FAIL_THRESHOLD = _get("MATCH_ORB_FAIL_THRESHOLD", 0.0, float)
+ART_MIN_FRAC = _get("ART_MIN_FRAC", 0.35, float)
 AI_SET_PAD_LEFT = _get("AI_SET_PAD_LEFT", 0.0, float)
 AI_SET_PAD_RIGHT = _get("AI_SET_PAD_RIGHT", 0.0, float)
 AI_SET_PAD_TOP = _get("AI_SET_PAD_TOP", 0.0, float)
@@ -160,6 +172,7 @@ AI_SET_PAD_BOTTOM = _get("AI_SET_PAD_BOTTOM", 0.0, float)
 # =========================
 SCRYFALL_TIMEOUT = _get("SCRYFALL_TIMEOUT", 6.0, float)
 FAST_SCRY_TIMEOUT = _get("FAST_SCRY_TIMEOUT", 3.0, float)
+SCRY_IMG_TIMEOUT = _get("SCRY_IMG_TIMEOUT", SCRYFALL_TIMEOUT, float)
 FX_URL = _get("FX_URL", "https://api.exchangerate.host/latest?base=USD&symbols=CAD", str)
 FX_TTL_SEC = _get("FX_TTL_SEC", 43200, int)
 
@@ -178,18 +191,22 @@ SNAPSHOT_CARD_SCALE  = _get("SNAPSHOT_CARD_SCALE", 1.25, float)    # >1.0 upsamp
 # =========================
 MOONRAKER_URL = _get("MOONRAKER_URL", "ws://localhost:7125/websocket", str)
 HTTP_POST_URL = _get("HTTP_POST_URL", "http://localhost:7125/printer/gcode/script", str)
+HTTP_TIMEOUT = _get("HTTP_TIMEOUT", 5.0, float)
+DETECT_ONLY_WHEN_READY = _get("DETECT_ONLY_WHEN_READY", False, bool)
 
 # =========================
 # STACKS / SORTER
 # =========================
 CARD_THICKNESS_MM = _get("CARD_THICKNESS_MM", 0.305, float)
 REMEASURE_EVERY   = _get("REMEASURE_EVERY", 5, int)  # cards per re-probe (0 = disable)
+STACK_PROBE_PER_PICK = _get("STACK_PROBE_PER_PICK", True, bool)
 
 # =========================
 # DEBUG
 # =========================
 # 1=errors, 2=warnings, 3=info (default), 4=debug/noisy
 DEBUG_LEVEL    = _get("DEBUG_LEVEL", 4, int)
+COMPARE_DEBUG  = _get("COMPARE_DEBUG", True, bool)
 
 # =========================
 # PERSISTENCE (Review history)
@@ -202,6 +219,7 @@ JPEG_QUALITY_CMP  = _get("JPEG_QUALITY_CMP",  95, int)
 JPEG_QUALITY_THUMB= _get("JPEG_QUALITY_THUMB", 95, int)
 HISTORY_API_DEFAULT_LIMIT = _get("HISTORY_API_DEFAULT_LIMIT", 200, int)
 HISTORY_API_MAX_LIMIT     = _get("HISTORY_API_MAX_LIMIT", 2000, int)  # 0 = unlimited
+CARDS_PER_H_WINDOW_SEC    = _get("CARDS_PER_H_WINDOW_SEC", 120.0, float)
 
 # =========================
 # SERVER
@@ -250,6 +268,7 @@ AI_LEGEND_FONT_SCALE = _get("AI_LEGEND_FONT_SCALE", 2.5, float)
 AI_LEGEND_FONT_THICKNESS = _get("AI_LEGEND_FONT_THICKNESS", 3, int)
 AI_LEGEND_LINE_THICKNESS = _get("AI_LEGEND_LINE_THICKNESS", 8, int)
 AI_LEGEND_PAD = _get("AI_LEGEND_PAD", 10, int)
+AI_DRAW_LEGEND = _get("AI_DRAW_LEGEND", False, bool)
 AI_ONLY_MODE = _get("AI_ONLY_MODE", True, bool)
 AI_CARD_MIN_CONF      = _get("AI_CARD_MIN_CONF",      0.15, float)
 AI_SETNAME_MIN_CONF   = _get("AI_SETNAME_MIN_CONF",   0.30, float)
@@ -262,6 +281,7 @@ AI_CARD_MIN_AREA_STRICT = _get("AI_CARD_MIN_AREA_STRICT", 0.12, float)
 AI_CARD_MAX_TOP       = _get("AI_CARD_MAX_TOP",       0.55, float)
 AI_NAME_PAD_X = _get("AI_NAME_PAD_X", 0.055, float)  # widen left/right so first/last letters are not clipped
 AI_NAME_PAD_Y = _get("AI_NAME_PAD_Y", 0.010, float)  # slight vertical headroom
+AI_CARD_NAME_PAD = _get("AI_CARD_NAME_PAD", 0.04, float)
 AI_TOPLINE_FRAC_MIN = _get("AI_TOPLINE_FRAC_MIN", 0.14, float)  # at least this fraction of ROI height considered 'top line' for join
 AI_TOPLINE_MULT = _get("AI_TOPLINE_MULT", 2.0, float)
 SET_ICON_FALLBACK_ENABLE = _get("SET_ICON_FALLBACK_ENABLE", False, bool)   # use set icon → code when set code OCR fails
@@ -269,6 +289,10 @@ SET_NAME_FALLBACK_ENABLE = _get("SET_NAME_FALLBACK_ENABLE", False, bool)
 ICON_MATCH_BUDGET_S = _get("ICON_MATCH_BUDGET_S", 3.0, float)
 ICON_MATCH_HTTP_TIMEOUT = _get("ICON_MATCH_HTTP_TIMEOUT", 3.0, float)
 ICON_MATCH_MAX_SETS = _get("ICON_MATCH_MAX_SETS", 800, int)
+ICON_MATCH_SIZE = _get("ICON_MATCH_SIZE", 96, int)
+ICON_MATCH_ACCEPT = _get("ICON_MATCH_ACCEPT", 1.0, float)
+ICON_MATCH_MARGIN = _get("ICON_MATCH_MARGIN", 0.02, float)
+ICON_MATCH_REQUIRE_CLEAR_WIN = _get("ICON_MATCH_REQUIRE_CLEAR_WIN", True, bool)
 SCRY_SETS_CACHE_PATH = _get("SCRY_SETS_CACHE_PATH", "./cache/scry_sets.json", str)
 SCRY_SETS_CACHE_TTL_S = _get("SCRY_SETS_CACHE_TTL_S", 86400, int)
 REQUIRE_PRINTER_ACK = _get('REQUIRE_PRINTER_ACK', False, bool)
@@ -287,10 +311,12 @@ SCRY_FEATS_LRU_MAX  = _get("SCRY_FEATS_LRU_MAX", 300, int) # features LRU (in-me
 # AUTOSCAN / STEADY (helpers)
 # =========================
 FAST_OCR_MODE            = _get("FAST_OCR_MODE", True, bool)
+FAST_REPROCESS_SCRY_TIMEOUT = _get("FAST_REPROCESS_SCRY_TIMEOUT", 30.0, float)
 # Reprocess speed knobs
 REPROCESS_MAX_WIDTH      = _get("REPROCESS_MAX_WIDTH", 640, int)          # downscale snapshot width before re-OCR (0=off)
 REPROCESS_SKIP_AI_ROIS   = _get("REPROCESS_SKIP_AI_ROIS", True, bool)    # skip AI ROI refresh during reprocess
 REPROCESS_SKIP_FOIL_DETECT = _get("REPROCESS_SKIP_FOIL_DETECT", True, bool)  # skip foil detect during reprocess
+REPROCESS_TIMER_DEBUG    = _get("REPROCESS_TIMER_DEBUG", True, bool)
 
 # =========================
 # ORIENTATION
@@ -313,7 +339,13 @@ PREDICT_HOLD = _get("PREDICT_HOLD", 8, int)
 STEADY_SPEED_PX = _get("STEADY_SPEED_PX", 1.05, float)
 WARP_EXPAND_PCT = _get("WARP_EXPAND_PCT", 0.01, float)
 WARP_CROP_PCT = _get("WARP_CROP_PCT", 0.0, float)
+WARP_EDGE_PAD_PCT = _get("WARP_EDGE_PAD_PCT", 0.018, float)
 DETECT_MAX_FPS = _get("DETECT_MAX_FPS", 60, int)
+REFINE_WARP_EDGE_CROP_PCT = _get("REFINE_WARP_EDGE_CROP_PCT", 0.004, float)
+REFINE_PAD_RATIO = _get("REFINE_PAD_RATIO", 0.09, float)
+REFINE_MIN_CONTOUR_FRAC = _get("REFINE_MIN_CONTOUR_FRAC", 0.02, float)
+REFINE_ASPECT_TOL = _get("REFINE_ASPECT_TOL", 0.35, float)
+REFINE_MAX_DELTA_PX = _get("REFINE_MAX_DELTA_PX", 22.0, float)
 APPEARANCE_ALIGN_ENABLE = _get("APPEARANCE_ALIGN_ENABLE", True, bool)
 APPEARANCE_AB_STRENGTH = _get("APPEARANCE_AB_STRENGTH", 0.55, float)
 APPEARANCE_SAT_STRENGTH = _get("APPEARANCE_SAT_STRENGTH", 0.65, float)

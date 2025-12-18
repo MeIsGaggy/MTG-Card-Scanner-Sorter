@@ -74,10 +74,9 @@
       <div class="content">
         <!-- Printer controls bar -->
         <div class="prn-mainbar toolbar" id="cmp-printer-controls">
-          <button id="btnHomePrep" class="btn btn-pill">1. Home</button>
-          <button id="btnMeasureDeck" class="btn btn-pill">2. Measure Deck</button>
-          <button id="btnStartRun" class="btn btn-pill btn-primary">3. Start…</button>
-          <button id="btn-open-printer" class="btn btn-pill">Printer Controls…</button>
+          <button id="btnHomePrep" class="btn btn-pill">Home Sorter</button>
+          <button id="btnStartRun" class="btn btn-pill btn-primary">Start Scanning Cycle</button>
+          <button id="btn-open-printer" class="btn btn-pill">Printer Controls</button>
           <button class="btn-estop" onclick="estop()">EMERGENCY STOP</button>
           <div class="spacer"></div>
           <!-- (Keep E-STOP in Status for always-on access) -->
@@ -95,13 +94,20 @@
           <button id="btnMarkPass">Pass</button>
           <button id="btnMarkFail">Fail</button>
           <button id="btnEdit">Edit</button>
-          <button id="btnReprocess">Reprocess</button>
-          <button id="btnReprocessBatch">Batch Reprocess</button>
           <button id="btnDelete" class="danger">Delete</button>
-          <button id="btn-open-history" class="btn btn-pill">All History…</button>
           <button id="btn-open-filter" class="btn btn-pill">Filters…</button>
-          <button id="btn-export-txt"  class="btn btn-pill">Export Decklist</button>
-          <button id="btn-export-csv"  class="btn btn-pill">Export CSV</button>
+          <div class="history-other">
+            <button id="btn-history-other" class="btn btn-pill btn-ghost" aria-haspopup="true" aria-expanded="false">Other ▴</button>
+            <div id="history-other-menu" class="other-menu hidden" role="menu">
+              <button id="btnReprocess" class="btn btn-pill" role="menuitem">Reprocess</button>
+              <button id="btnReprocessBatch" class="btn btn-pill" role="menuitem">Batch Reprocess</button>
+              <button id="btnQuarantine" class="btn btn-pill btn-ghost" role="menuitem">Quarantine…</button>
+              <button id="btn-open-history" class="btn btn-pill" role="menuitem">All History…</button>
+              <button id="btn-export-txt"  class="btn btn-pill" role="menuitem">Export Decklist</button>
+              <button id="btn-export-csv"  class="btn btn-pill" role="menuitem">Export CSV</button>
+              <button id="btn-backup" class="btn btn-pill btn-ghost" role="menuitem">Backup/Restore</button>
+            </div>
+          </div>
           <div class="spacer"></div>
           <strong id="revCount">0</strong>
         </div>
@@ -124,7 +130,7 @@
     <div class="mm-modal__header" style="position:sticky;top:0;z-index:1;">
       <div class="mm-title">All History</div>
       <button class="btn btn-pill" id="history-filter">Filters…</button>
-      <button class="btn btn-pill btn-ghost" id="history-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="history-close">Close</button>
     </div>
     <div class="mm-modal__body" style="flex:1 1 auto;min-height:0;overflow:auto;padding:16px;">
       <div id="history-grid" class="history-grid history-grid-inline" aria-label="All history grid"></div>
@@ -135,7 +141,7 @@
   <div id="history-options-modal" class="mm-modal hidden" style="max-width:420px; z-index:120;" aria-hidden="true">
     <div class="mm-modal__header">
       <div class="mm-title">Choose Action</div>
-      <button class="btn btn-pill btn-ghost" id="histopt-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="histopt-close">Close</button>
     </div>
         <div class="mm-modal__body">
           <div class="mm-grid" style="grid-template-columns: 1fr;">
@@ -144,10 +150,42 @@
         <button class="btn btn-pill"              id="histopt-review">Mark Review</button>
         <button class="btn btn-pill"              id="histopt-edit">Edit…</button>
         <button class="btn btn-pill"              id="histopt-reprocess">Reprocess…</button>
-            <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
+        <button class="btn btn-pill btn-ghost"    id="histopt-delete">Delete</button>
           </div>
         </div>
       </div>
+  <div id="backup-modal" class="mm-modal hidden" aria-hidden="true" style="max-width:560px;">
+    <div class="mm-modal__header">
+      <div class="mm-title">Backup / Restore</div>
+      <button class="btn btn-pill btn-ghost" id="backup-close">Close</button>
+    </div>
+    <div class="mm-modal__body">
+      <div class="mm-grid" style="grid-template-columns: 1fr;">
+        <div class="mm-card">
+          <h3 style="margin:0 0 8px 0;">Export full history</h3>
+          <p style="margin:0 0 10px 0;">Includes all saved cards, snapshots, comparison images, and a decklist.</p>
+          <label class="mm-check"><input type="checkbox" id="backup-compact" checked> Compact images (smaller file)</label>
+          <button class="btn btn-pill btn-primary" id="backup-export">Export Backup</button>
+          <div id="backup-export-status" class="muted" style="margin-top:6px;"></div>
+        </div>
+        <div class="mm-card">
+          <h3 style="margin:0 0 8px 0;">Import backup</h3>
+          <p style="margin:0 0 10px 0;">Restores history entries as if they were never removed.</p>
+          <input type="file" id="backup-file" accept=".tar.gz" style="margin-bottom:8px;">
+          <div class="row" style="align-items:center;gap:8px;margin-bottom:8px;">
+            <label for="backup-mode" style="font-weight:bold;">Mode</label>
+            <select id="backup-mode">
+              <option value="replace">Replace current history</option>
+              <option value="merge">Merge (keep existing)</option>
+            </select>
+          </div>
+          <label class="mm-check"><input type="checkbox" id="backup-reassign" checked> Reassign IDs on conflict (merge only)</label>
+          <button class="btn btn-pill" id="backup-import">Import Backup</button>
+          <div id="backup-import-status" class="muted" style="margin-top:6px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Edit modal -->
   <div id="editModal" class="modal" aria-hidden="true">
@@ -155,7 +193,7 @@
     <div class="card" role="dialog" aria-modal="true" aria-labelledby="editTitle">
       <div class="head">
         <strong id="editTitle">Edit Card</strong>
-        <button class="close" id="editClose" aria-label="Close">×</button>
+        <button class="close" id="editClose" aria-label="Close">Close</button>
       </div>
       <div class="body">
         <div class="row">
@@ -176,7 +214,7 @@
     <div class="card reprocess-card" role="dialog" aria-modal="true" aria-labelledby="reprocessTitle">
       <div class="head">
         <strong id="reprocessTitle">Reprocess Card</strong>
-        <button class="close" id="reprocessClose" aria-label="Close">×</button>
+        <button class="close" id="reprocessClose" aria-label="Close">Close</button>
       </div>
       <div class="body">
         <div id="reprocessStatus" class="reprocess-status">Preparing…</div>
@@ -197,10 +235,10 @@
           </div>
           <div class="reproc-col">
             <h3>New Detection</h3>
-            <div class="reproc-field"><span>Name</span><strong id="reNewName">—</strong></div>
+            <div class="reproc-field"><span>Name</span><input id="reNewName" class="mm-input reproc-edit" type="text" aria-label="New name"></div>
             <div class="reproc-field sub"><span>Suggested</span><em id="reNewScry">—</em></div>
-            <div class="reproc-field"><span>Set</span><strong id="reNewSet">—</strong></div>
-            <div class="reproc-field"><span>Number</span><strong id="reNewNumber">—</strong></div>
+            <div class="reproc-field"><span>Set</span><input id="reNewSet" class="mm-input reproc-edit" type="text" aria-label="New set code"></div>
+            <div class="reproc-field"><span>Number</span><input id="reNewNumber" class="mm-input reproc-edit" type="text" aria-label="New collector number"></div>
             <div class="reproc-field"><span>Match</span><strong id="reNewScore">—</strong></div>
             <div class="reproc-field"><span>Flagged</span><strong id="reNewFlag">—</strong></div>
             <img id="reNewCmp" class="reproc-img hidden" alt="New comparison">
@@ -221,17 +259,13 @@
     <div class="card reprocess-card" role="dialog" aria-modal="true" aria-labelledby="reprocessBatchTitle">
       <div class="head">
         <strong id="reprocessBatchTitle">Batch Reprocess (Flagged Cards)</strong>
-        <button class="close" id="reprocessBatchClose" aria-label="Close">×</button>
+        <button class="close" id="reprocessBatchClose" aria-label="Close">Close</button>
       </div>
       <div class="body">
         <div id="reprocessBatchStatus" class="reprocess-status">Preparing…</div>
         <div class="progress-block">
           <span>Batch Progress</span>
           <div class="progress"><div id="reprocessBatchOverallBar"></div></div>
-        </div>
-        <div class="progress-block">
-          <span>Current Card</span>
-          <div class="progress alt"><div id="reprocessBatchCurrentBar"></div></div>
         </div>
         <div id="reprocessBatchList" class="reproc-batch-list hidden" aria-live="polite"></div>
       </div>
@@ -246,7 +280,7 @@
   <div id="filter-modal" class="mm-modal hidden" style="z-index:130;">
     <div class="mm-modal__header">
       <div class="mm-title">Filter History</div>
-      <button class="btn btn-pill btn-ghost" id="filter-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="filter-close">Close</button>
     </div>
     <div class="mm-modal__body">
       <div class="mm-grid">
@@ -316,20 +350,107 @@
   <div id="export-modal" class="mm-modal hidden" aria-hidden="true">
     <div class="mm-modal__header">
       <div class="mm-title">Export CSV</div>
-      <button class="btn btn-pill btn-ghost" id="export-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="export-close">Close</button>
     </div>
     <div class="mm-modal__body">
       <p class="muted" style="margin:.25rem 0 .75rem 0;">
         Choose columns to include. This exports the <b>currently filtered</b> results.
       </p>
+      <p class="muted" style="margin:-4px 0 10px 0;">
+        Use <b>CardSphere preset</b> for CSVs that match the CardSphere importer headers.
+      </p>
+      <div class="mm-grid" style="grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:10px;">
+        <label class="mm-field">
+          <span>Condition (applied to all rows)</span>
+          <input id="export-cond" class="mm-input" type="text" placeholder="e.g. NM">
+        </label>
+        <label class="mm-field">
+          <span>Language (applied to all rows)</span>
+          <input id="export-lang" class="mm-input" type="text" placeholder="e.g. EN or English">
+        </label>
+      </div>
       <div id="export-field-list" class="mm-checklist"></div>
+      <div id="export-example" class="mm-box" style="margin-top:12px; padding:10px; font-size:12px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+          <div class="mm-title" style="font-size:13px;">Example preview</div>
+          <span class="pill warn" style="font-size:11px;">Updates as you toggle fields</span>
+        </div>
+        <pre id="export-example-text" style="white-space:pre-wrap; word-break:break-all; margin:0;"></pre>
+      </div>
     </div>
     <div class="mm-modal__footer">
       <button id="export-selectall" class="btn btn-pill btn-ghost">Select all</button>
       <button id="export-clear"      class="btn btn-pill btn-ghost">Clear</button>
       <button id="export-defaults"   class="btn btn-pill btn-ghost">Archidekt defaults</button>
+      <button id="export-cardsphere" class="btn btn-pill btn-ghost">CardSphere preset</button>
       <div class="spacer"></div>
       <button id="export-go" class="btn btn-pill btn-primary">Export CSV</button>
+    </div>
+  </div>
+
+  <!-- Quarantine Modal -->
+  <div id="quarantine-modal" class="mm-modal hidden" aria-hidden="true" style="max-width: 980px;">
+    <div class="mm-modal__header">
+      <div class="mm-title">Quarantined Cards</div>
+      <div class="spacer"></div>
+      <button id="quarantine-close" class="btn btn-pill btn-ghost">Close</button>
+    </div>
+    <div class="mm-modal__body">
+      <div class="quarantine-wrap">
+        <div class="quarantine-list" id="quarantine-list" aria-label="Quarantined items"></div>
+        <div class="quarantine-detail">
+          <div class="mm-field">
+            <span>Card ID</span>
+            <input id="q-id" class="mm-input" type="text" readonly>
+          </div>
+          <div class="mm-grid">
+            <label class="mm-field">
+              <span>Name</span>
+              <input id="q-name" class="mm-input" type="text" placeholder="Name">
+            </label>
+            <label class="mm-field">
+              <span>Set</span>
+              <input id="q-set" class="mm-input" type="text" placeholder="Set code">
+            </label>
+            <label class="mm-field">
+              <span>Number</span>
+              <input id="q-number" class="mm-input" type="text" placeholder="Collector number">
+            </label>
+            <label class="mm-field">
+              <span>Status</span>
+              <select id="q-status" class="mm-input">
+                <option value="pass">Pass</option>
+                <option value="fail">Fail</option>
+                <option value="review">Review</option>
+              </select>
+            </label>
+          </div>
+          <div class="mm-grid">
+            <label class="mm-field">
+              <span>Match Score</span>
+              <input id="q-match" class="mm-input" type="number" min="0" max="1" step="0.001" placeholder="0.0">
+            </label>
+            <label class="mm-field">
+              <span>Flagged</span>
+              <select id="q-flagged" class="mm-input">
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+            </label>
+          </div>
+          <label class="mm-field">
+            <span>Review Reasons (one per line)</span>
+            <textarea id="q-reasons" class="mm-input" rows="3" placeholder="Reason 1&#10;Reason 2"></textarea>
+          </label>
+          <div class="mm-row">
+            <button id="q-delete" class="btn btn-pill danger">Delete</button>
+            <div class="spacer"></div>
+            <button id="q-autofix" class="btn btn-pill">Auto-Fix</button>
+            <button id="q-save" class="btn btn-pill btn-primary">Save & Restore</button>
+          </div>
+          <div id="q-status-text" class="quarantine-status"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -338,7 +459,7 @@
   <div id="settings-modal" class="mm-modal hidden" style="max-width:900px;">
     <div class="mm-modal__header">
       <div class="mm-title">Scanner Settings</div>
-      <button class="btn btn-pill btn-ghost" id="settings-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="settings-close">Close</button>
     </div>
     <div id="settings-note" style="margin-top:10px; text-align: center; font-size:12px; opacity:.8;">
       Changes are saved to <code>settings.json</code>. Restart the app to ensure changes are applied.
@@ -358,7 +479,7 @@
   <div id="start-modal" class="mm-modal hidden" aria-hidden="true" style="max-width:420px;">
     <div class="mm-modal__header">
       <div class="mm-title">Start Run</div>
-      <button class="btn btn-pill btn-ghost" id="start-close">✕</button>
+      <button class="btn btn-pill btn-ghost" id="start-close">Close</button>
     </div>
     <div class="mm-modal__body">
       <div class="mm-grid">
@@ -367,7 +488,7 @@
           <input id="start-count" type="number" min="1" step="1" value="1" class="mm-input">
         </label>
       </div>
-      <p class="muted" style="margin-top:.5rem;">Runs <code>RUN_SORTER_INTERACTIVE</code> for the given count.</p>
+      <p class="muted" style="margin-top:.5rem;">Enter the number of cards to process or enter 0 to run until both stacks are empty</p>
     </div>
     <div class="mm-modal__footer">
       <button class="btn btn-pill btn-ghost" id="start-cancel">Cancel</button>
@@ -381,7 +502,7 @@
 <div id="printer-modal" class="mm-modal hidden" aria-hidden="true" style="max-width:740px;">
   <div class="mm-modal__header">
     <div class="mm-title">Printer Controls</div>
-    <button class="btn btn-pill btn-ghost" id="printer-close">✕</button>
+    <button class="btn btn-pill btn-ghost" id="printer-close">Close</button>
   </div>
   <div class="mm-modal__body">
     
@@ -420,6 +541,10 @@
   </div>
   <div class="pc-speed-wrap" role="group" aria-label="Speed (mm/min)">
     <span class="pc-label">Speed</span>
+     ⚠ Be careful when using high speeds. Setting this too high can destroy your printer ⚠
+     </br>
+     ⚠ If you hear grinding/buzzing press the E-stop immediately, power-cycle the printer and lower the speed ⚠
+    
     <div class="pc-speed-chips">
       <button class="pc-speed" data-speed="600">600</button>
       <button class="pc-speed" data-speed="1200">1200</button>
@@ -430,9 +555,7 @@
     <input id="pc-speed-input" type="number" class="mm-input pc-speed-input" value="6000" step="1" min="1" aria-label="Speed input (mm/min)">
     <span class="pc-speed-warning">
       These speeds settings do NOT change speed of scanning cycles.
-    </br>
-    </br>
-    ⚠ Be careful when using high speeds. Setting this too high can destroy your printer ⚠
+    </br>   
   </span>
   </div>
 </div>

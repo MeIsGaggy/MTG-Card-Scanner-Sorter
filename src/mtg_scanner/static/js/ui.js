@@ -91,9 +91,52 @@
   const backupFile = document.getElementById("backup-file");
   const backupMode = document.getElementById("backup-mode");
   const backupReassign = document.getElementById("backup-reassign");
+  const btnHistoryOther = document.getElementById("btn-history-other");
+  const historyOtherMenu = document.getElementById("history-other-menu");
   const consoleBox   = document.getElementById("consoleBox");
   const btnLogPause  = document.getElementById("btnLogPause");
   const btnLogClear  = document.getElementById("btnLogClear");
+
+  // History toolbar overflow menu
+  if (btnHistoryOther && historyOtherMenu) {
+    const closeMenu = () => {
+      historyOtherMenu.classList.add("hidden");
+      btnHistoryOther.setAttribute("aria-expanded", "false");
+      historyOtherMenu.style.visibility = "";
+      historyOtherMenu.style.left = "";
+      historyOtherMenu.style.top = "";
+    };
+    const openMenu = () => {
+      historyOtherMenu.classList.remove("hidden");
+      historyOtherMenu.style.visibility = "hidden";
+      requestAnimationFrame(() => {
+        const rect = btnHistoryOther.getBoundingClientRect();
+        const menuW = historyOtherMenu.offsetWidth || 220;
+        const menuH = historyOtherMenu.offsetHeight || 200;
+        const gutter = 8;
+        const left = Math.max(gutter, Math.min(rect.left, window.innerWidth - menuW - gutter));
+        const top = Math.max(gutter, rect.top - menuH - 6);
+        historyOtherMenu.style.left = `${left}px`;
+        historyOtherMenu.style.top = `${top}px`;
+        historyOtherMenu.style.visibility = "visible";
+        btnHistoryOther.setAttribute("aria-expanded", "true");
+      });
+    };
+    btnHistoryOther.addEventListener("click", (e) => {
+      e.preventDefault();
+      const isOpen = !historyOtherMenu.classList.contains("hidden");
+      if (isOpen) {
+        closeMenu();
+      } else {
+        openMenu();
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!btnHistoryOther || !historyOtherMenu) return;
+      if (btnHistoryOther.contains(e.target) || historyOtherMenu.contains(e.target)) return;
+      closeMenu();
+    });
+  }
 
   let currentLoadedId = null;
   let lastScansSig = "";
@@ -889,7 +932,30 @@ const SETTINGS_SCHEMA = [
       {k:"MAX_CARDS", label:"Max cards", type:"int"},
       {k:"DETECT_EVERY_N_FRAMES", label:"Detect cadence (N frames)", type:"int"},
       {k:"RECTANGULARITY_MIN", label:"Rectangularity min (0..1)", type:"float"},
+      {k:"CARD_DETECT_MIN_SCORE", label:"Card detect min score", type:"float"},
       {k:"DETECT_QUAD_PAD_PCT", label:"Quad pad pct (0..0.1)", type:"float"},
+      {k:"CARD_BG_BLUR", label:"Card background blur", type:"int"},
+      {k:"CARD_CLAHE_CLIP", label:"CLAHE clip", type:"float"},
+      {k:"CARD_CLAHE_TILE", label:"CLAHE tile size", type:"int"},
+      {k:"CARD_BLACKHAT_KERNEL", label:"Blackhat kernel", type:"int"},
+      {k:"CARD_CHANNEL_THRESH_C", label:"Channel threshold C", type:"float"},
+      {k:"CARD_MASK_MIN_COMPONENT", label:"Mask min component", type:"float"},
+      {k:"CARD_MASK_BORDER_TRIM_PCT", label:"Mask border trim pct", type:"float"},
+      {k:"CARD_EDGE_MIN_STRENGTH", label:"Edge min strength", type:"float"},
+      {k:"CARD_EDGE_MIN_CONTRAST", label:"Edge min contrast", type:"float"},
+      {k:"CARD_EDGE_RING_FRAC", label:"Edge ring fraction", type:"float"},
+      {k:"CARD_EDGE_SNAP_FRAC", label:"Edge snap fraction", type:"float"},
+      {k:"CARD_EDGE_CONTRAST_WEIGHT", label:"Edge contrast weight", type:"float"},
+      {k:"CARD_EDGE_CONTRAST_STEP", label:"Edge contrast step", type:"int"},
+      {k:"CARD_CROP_LIVE", label:"Live feed shows card crop", type:"bool"},
+      {k:"CARD_RING_OUTSIDE_MIN_FRAC", label:"Ring outside min frac", type:"float"},
+      {k:"QUAD_STICKY_PX", label:"Quad hysteresis (px)", type:"float"},
+      {k:"QUAD_SMOOTH_MIN_ALPHA", label:"Quad smooth min alpha", type:"float"},
+      {k:"QUAD_SMOOTH_MAX_ALPHA", label:"Quad smooth max alpha", type:"float"},
+      {k:"QUAD_FREEZE_THRESH", label:"Quad freeze threshold", type:"float"},
+      {k:"QUAD_BLEND_THRESH", label:"Quad blend threshold", type:"float"},
+      {k:"MANUAL_CROP_ENABLED", label:"Manual crop overlay", type:"bool"},
+      {k:"MANUAL_CROP_QUAD", label:"Manual crop quad (json)"},
     ]
   },
   {
@@ -897,20 +963,59 @@ const SETTINGS_SCHEMA = [
     items: [
       {k:"AUTO_CAPTURE_WAIT_S", label:"Capture grace delay (s)", type:"float"},
       {k:"AUTOSCAN_OCR_TIMEOUT", label:"OCR timeout (s)", type:"float"},
+      {k:"AUTO_CAPTURE_STEADY_HOLD_S", label:"Steady hold before capture (s)", type:"float"},
+      {k:"AUTO_CAPTURE_STEADY_TIMEOUT_S", label:"Steady timeout (s)", type:"float"},
+      {k:"AUTO_ORIENT", label:"Auto orient cards", type:"bool"},
+    ]
+  },
+  {
+    title: "Steady / Autoscan",
+    items: [
+      {k:"STEADY_MIN_FRAMES", label:"Steady min frames", type:"int"},
+      {k:"STEADY_RELAX_FRAMES", label:"Steady relax frames", type:"int"},
+      {k:"STEADY_PROMOTE_S", label:"Steady promote delay (s)", type:"float"},
+      {k:"STEADY_DOWNSCALE_W", label:"Steady downscale width", type:"int"},
+      {k:"STEADY_EMA_ALPHA", label:"Steady EMA alpha", type:"float"},
+      {k:"STEADY_BLUR_VAR_MIN", label:"Steady blur variance min", type:"float"},
+      {k:"STEADY_MOTION_MAX", label:"Steady motion max", type:"float"},
     ]
   },
   {
     title: "OCR & Debug",
     items: [
+      {k:"OCR_BACKEND", label:"OCR backend"},
       {k:"OCR_ONLY_ON_SNAPSHOT", label:"OCR only on snapshot", type:"bool"},
       {k:"DEBUG_OCR", label:"Debug OCR", type:"bool"},
       {k:"OCR_DEBUG_BOXES", label:"Draw OCR boxes", type:"bool"},
       {k:"SHOW_ROI_OVERLAY", label:"Show ROI overlay", type:"bool"},
+      {k:"CARD_STREAM_LIVE", label:"Send live card crops", type:"bool"},
+      {k:"LIVE_CROP_WHILE_PAUSED", label:"Live crop while paused", type:"bool"},
       {k:"MIN_TITLE_LETTERS", label:"Min title letters", type:"int"},
       {k:"TEXT_PRESENCE_MIN", label:"Text presence min", type:"float"},
       {k:"TITLE_ALLOW_TESS_FALLBACK", label:"Allow tess fallback", type:"bool"},
       {k:"USE_TESS_FOR_TITLES", label:"Use Tesseract for titles", type:"bool"},
       {k:"OCR_ENABLE_BLACKHAT", label:"Enable Blackhat preproc", type:"bool"},
+      {k:"PERF_TIMING_DEBUG", label:"Performance timing debug", type:"bool"},
+    ]
+  },
+  {
+    title: "OCR Budgets & Numbers",
+    items: [
+      {k:"OCR_NAME_BUDGET_S", label:"Title OCR budget (s)", type:"float"},
+      {k:"SET_OCR_BUDGET_S", label:"Set/icon budget (s)", type:"float"},
+      {k:"OCR_NUM_BUDGET_S", label:"Number OCR budget (s)", type:"float"},
+      {k:"OCR_NUM_HARD_CAP_S", label:"Number OCR hard cap (s)", type:"float"},
+      {k:"OCR_NUM_SOFT_CAP_S", label:"Number OCR soft cap (s)", type:"float"},
+      {k:"OCR_NUM_FAST_CAP_S", label:"Number OCR fast cap (s)", type:"float"},
+      {k:"OCR_NUM_ALLOW_SLOW", label:"Allow slow number OCR", type:"bool"},
+      {k:"OCR_NUM_MAX_ROIS", label:"Max number ROIs", type:"int"},
+      {k:"OCR_NUM_MAX_ROI_W", label:"Max number ROI width", type:"int"},
+      {k:"OCR_NUM_PREFIX_STRIP", label:"Strip leading zeros", type:"bool"},
+      {k:"OCR_NUM_EARLY_EXIT_CONF", label:"Early exit confidence", type:"float"},
+      {k:"OCR_NUM_STRONG_EXIT_CONF", label:"Strong exit confidence", type:"float"},
+      {k:"OCR_NUM_TIMING_DEBUG", label:"Number OCR timing debug", type:"bool"},
+      {k:"OCR_SKIP_NUMBER", label:"Skip number OCR", type:"bool"},
+      {k:"OCR_FAST_NUMBER_CONF_EXIT", label:"Fast path number conf exit", type:"float"},
     ]
   },
   {
@@ -920,8 +1025,27 @@ const SETTINGS_SCHEMA = [
       {k:"LIVE_OCR_ONLY_WHEN_STEADY", label:"Live OCR only when steady", type:"bool"},
       {k:"LIVE_OCR_MIN_INTERVAL", label:"Live OCR min interval (s)", type:"float"},
       {k:"FOIL_EVERY_N_FRAMES", label:"Foil detect every N frames", type:"int"},
+      {k:"FAST_REPROCESS_SCRY_TIMEOUT", label:"Fast reprocess Scry timeout (s)", type:"float"},
+      {k:"REPROCESS_MAX_WIDTH", label:"Reprocess max width", type:"int"},
+      {k:"REPROCESS_SKIP_AI_ROIS", label:"Skip AI ROIs during reprocess", type:"bool"},
+      {k:"REPROCESS_SKIP_FOIL_DETECT", label:"Skip foil detect during reprocess", type:"bool"},
+      {k:"REPROCESS_TIMER_DEBUG", label:"Reprocess timer debug", type:"bool"},
       {k:"USE_OPENCL", label:"Use OpenCL (if available)", type:"bool"},
       {k:"SC_IMG_CACHE_DIR", label:"Scry image cache dir"},
+    ]
+  },
+  {
+    title: "OCR Fast Path",
+    items: [
+      {k:"OCR_USE_TESSERACT", label:"Use Tesseract backend", type:"bool"},
+      {k:"OCR_FAST_PATH", label:"Fast path enabled", type:"bool"},
+      {k:"OCR_LAZY_SET_HINT", label:"Lazy set hint", type:"bool"},
+      {k:"OCR_TITLE_SINGLE_PASS", label:"Single-pass title", type:"bool"},
+      {k:"OCR_TITLE_EARLY_EXIT", label:"Title early exit", type:"bool"},
+      {k:"OCR_TITLE_EARLY_CONF", label:"Title early conf", type:"float"},
+      {k:"OCR_TITLE_MAX_W", label:"Title max width", type:"int"},
+      {k:"OCR_NUMBER_FASTPATH", label:"Number fast path", type:"bool"},
+      {k:"REPROCESS_FORCE_FAST_OCR", label:"Force fast OCR when reprocessing", type:"bool"},
     ]
   },
   {
@@ -931,6 +1055,14 @@ const SETTINGS_SCHEMA = [
       {k:"FOIL_ON_TH", label:"Foil ON threshold", type:"float"},
       {k:"FOIL_OFF_TH", label:"Foil OFF threshold", type:"float"},
       {k:"FOIL_DETECT", label:"Enable foil detect", type:"bool"},
+      {k:"FOIL_SPEC_VAL_THRESHOLD", label:"Foil glare value threshold", type:"int"},
+      {k:"FOIL_SPEC_SAT_THRESHOLD", label:"Foil glare saturation threshold", type:"int"},
+      {k:"FOIL_SPEC_DILATE", label:"Foil glare dilate kernel", type:"int"},
+      {k:"FOIL_CLAHE_CLIP", label:"Foil CLAHE clip", type:"float"},
+      {k:"FOIL_CLAHE_TILE", label:"Foil CLAHE tile size", type:"int"},
+      {k:"FOIL_SAT_SCALE", label:"Foil saturation scale", type:"float"},
+      {k:"FOIL_GAMMA", label:"Foil gamma", type:"float"},
+      {k:"FOIL_UNSHARP_AMOUNT", label:"Foil unsharp amount", type:"float"},
     ]
   },
   {
@@ -944,6 +1076,9 @@ const SETTINGS_SCHEMA = [
       {k:"NAME_OK_TH",   label:"Name OK threshold", type:"float"},
       {k:"ALWAYS_SCAN_OK", label:"Mark scan OK even if match fails", type:"bool"},
       {k:"MATCH_USE_ART",label:"Use art region for compare", type:"bool"},
+      {k:"MATCH_REQUIRE_ORB", label:"Require ORB match", type:"bool"},
+      {k:"MATCH_ORB_FAIL_THRESHOLD", label:"ORB fail threshold", type:"float"},
+      {k:"ART_MIN_FRAC", label:"Min art crop fraction", type:"float"},
     ]
   },
   {
@@ -953,6 +1088,10 @@ const SETTINGS_SCHEMA = [
       {k:"MATCH_FAST_ACCEPT_DELTA", label:"Fast accept delta", type:"float"},
       {k:"MATCH_FAST_REJECT_DELTA", label:"Fast reject delta", type:"float"},
       {k:"HASH_STABILITY_BITS", label:"Min changed bits to re-OCR", type:"int"},
+      {k:"AI_SET_PAD_LEFT", label:"AI set pad left", type:"float"},
+      {k:"AI_SET_PAD_RIGHT", label:"AI set pad right", type:"float"},
+      {k:"AI_SET_PAD_TOP", label:"AI set pad top", type:"float"},
+      {k:"AI_SET_PAD_BOTTOM", label:"AI set pad bottom", type:"float"},
     ]
   },
   
@@ -969,14 +1108,66 @@ const SETTINGS_SCHEMA = [
       {k:"AI_CONF_THRES", label:"AI conf threshold", type:"float"},
       {k:"AI_IOU_THRES", label:"AI IoU threshold", type:"float"},
       {k:"AI_MAX_DETS", label:"AI max detections", type:"int"},
+      {k:"AI_ROIS_SNAPSHOT_ONLY", label:"AI ROIs only on snapshot", type:"bool"},
+      {k:"AI_CLASS_NAMES", label:"AI class names (json)"},
+      {k:"AI_BOX_THICKNESS", label:"AI box thickness", type:"int"},
+      {k:"AI_LEGEND_FONT_SCALE", label:"AI legend font scale", type:"float"},
+      {k:"AI_LEGEND_FONT_THICKNESS", label:"AI legend font thickness", type:"int"},
+      {k:"AI_LEGEND_LINE_THICKNESS", label:"AI legend line thickness", type:"int"},
+      {k:"AI_LEGEND_PAD", label:"AI legend padding", type:"int"},
+      {k:"AI_DRAW_LEGEND", label:"Show AI legend", type:"bool"},
+      {k:"AI_CARD_MIN_CONF", label:"AI card min confidence", type:"float"},
+      {k:"AI_SETNAME_MIN_CONF", label:"Set name min confidence", type:"float"},
+      {k:"AI_SETNAME_MIN_Y", label:"Set name min Y", type:"float"},
+      {k:"AI_SETNAME_MAX_Y", label:"Set name max Y", type:"float"},
+      {k:"AI_SETNAME_MIN_WIDTH", label:"Set name min width", type:"float"},
+      {k:"AI_SETNAME_MIN_HEIGHT", label:"Set name min height", type:"float"},
+      {k:"AI_CARD_MIN_AREA", label:"Card min area", type:"float"},
+      {k:"AI_CARD_MIN_AREA_STRICT", label:"Card min area (strict)", type:"float"},
+      {k:"AI_CARD_MAX_TOP", label:"Card max top", type:"float"},
+      {k:"AI_CARD_NAME_PAD", label:"Card name pad", type:"float"},
+      {k:"AI_NAME_PAD_X", label:"Name pad X", type:"float"},
+      {k:"AI_NAME_PAD_Y", label:"Name pad Y", type:"float"},
+      {k:"AI_TOPLINE_FRAC_MIN", label:"Topline fraction min", type:"float"},
+      {k:"AI_TOPLINE_MULT", label:"Topline multiplier", type:"float"},
+      {k:"AI_CARD_PAD_LEFT", label:"Card pad left", type:"float"},
+      {k:"AI_CARD_PAD_RIGHT", label:"Card pad right", type:"float"},
+      {k:"AI_CARD_PAD_Y", label:"Card pad Y", type:"float"},
+    ]
+  },
+  {
+    title: "Icon Matching & Fallbacks",
+    items: [
+      {k:"SET_ICON_FALLBACK_ENABLE", label:"Enable set icon fallback", type:"bool"},
+      {k:"SET_NAME_FALLBACK_ENABLE", label:"Enable set name fallback", type:"bool"},
+      {k:"ICON_MATCH_BUDGET_S", label:"Icon match budget (s)", type:"float"},
+      {k:"ICON_MATCH_HTTP_TIMEOUT", label:"Icon match HTTP timeout (s)", type:"float"},
+      {k:"ICON_MATCH_MAX_SETS", label:"Max sets to compare", type:"int"},
+      {k:"ICON_MATCH_SIZE", label:"Icon match size", type:"int"},
+      {k:"ICON_MATCH_ACCEPT", label:"Icon accept threshold", type:"float"},
+      {k:"ICON_MATCH_MARGIN", label:"Icon margin to next-best", type:"float"},
+      {k:"ICON_MATCH_REQUIRE_CLEAR_WIN", label:"Require clear winner", type:"bool"},
     ]
   },
   {
     title: "Scryfall & Prices",
     items: [
       {k:"SCRYFALL_TIMEOUT", label:"HTTP timeout (s)", type:"float"},
+      {k:"FAST_SCRY_TIMEOUT", label:"Fast Scry timeout (s)", type:"float"},
+      {k:"SCRY_IMG_TIMEOUT", label:"Image fetch timeout (s)", type:"float"},
       {k:"FX_URL", label:"FX URL"},
       {k:"FX_TTL_SEC", label:"FX TTL (s)", type:"int"},
+    ]
+  },
+  {
+    title: "Stream & Snapshots",
+    items: [
+      {k:"STREAM_ENABLED", label:"Enable stream", type:"bool"},
+      {k:"STREAM_FPS", label:"Stream FPS", type:"int"},
+      {k:"STREAM_JPEG_QUALITY", label:"Stream JPEG quality", type:"int"},
+      {k:"STREAM_WARP_DOWNSCALE", label:"Stream warp downscale", type:"float"},
+      {k:"STREAM_CARD_SCALE", label:"Stream card scale", type:"float"},
+      {k:"SNAPSHOT_CARD_SCALE", label:"Snapshot card scale", type:"float"},
     ]
   },
   {
@@ -984,6 +1175,9 @@ const SETTINGS_SCHEMA = [
     items: [
       {k:"MOONRAKER_URL", label:"WebSocket URL"},
       {k:"HTTP_POST_URL", label:"G-code HTTP URL"},
+      {k:"HTTP_TIMEOUT", label:"HTTP timeout (s)", type:"float"},
+      {k:"REQUIRE_PRINTER_ACK", label:"Require printer ACK", type:"bool"},
+      {k:"DETECT_ONLY_WHEN_READY", label:"Detect only when printer ready", type:"bool"},
     ]
   },
   {
@@ -991,12 +1185,14 @@ const SETTINGS_SCHEMA = [
     items: [
       {k:"CARD_THICKNESS_MM", label:"Card thickness (mm)", type:"float"},
       {k:"REMEASURE_EVERY", label:"Remeasure every N cards (0 = off)", type:"int"},
+      {k:"STACK_PROBE_PER_PICK", label:"Probe every pick", type:"bool"},
     ]
   },
   {
     title: "Debug & Paths",
     items: [
       {k:"DEBUG_LEVEL", label:"Debug level (1-4)", type:"int"},
+      {k:"COMPARE_DEBUG", label:"Compare debug", type:"bool"},
     ]
   },
   {
@@ -1008,8 +1204,21 @@ const SETTINGS_SCHEMA = [
       {k:"JPEG_QUALITY_SNAP", label:"JPEG quality (snap)", type:"int"},
       {k:"JPEG_QUALITY_CMP",  label:"JPEG quality (compare)", type:"int"},
       {k:"JPEG_QUALITY_THUMB",label:"JPEG quality (thumb)", type:"int"},
+      {k:"HISTORY_API_DEFAULT_LIMIT", label:"History API default limit", type:"int"},
+      {k:"HISTORY_API_MAX_LIMIT", label:"History API max limit", type:"int"},
+      {k:"CARDS_PER_H_WINDOW_SEC", label:"Cards/hr window (s)", type:"float"},
       {k:"HOST", label:"Bind host"},
       {k:"PORT", label:"Port", type:"int"},
+    ]
+  },
+  {
+    title: "Caching & Exports",
+    items: [
+      {k:"EXPORT_DIR", label:"Export dir"},
+      {k:"SCRY_IMG_LRU_MAX", label:"Scry image LRU max", type:"int"},
+      {k:"SCRY_FEATS_LRU_MAX", label:"Scry features LRU max", type:"int"},
+      {k:"SCRY_SETS_CACHE_PATH", label:"Scry sets cache path"},
+      {k:"SCRY_SETS_CACHE_TTL_S", label:"Scry sets cache TTL (s)", type:"int"},
     ]
   },
 
@@ -1026,7 +1235,14 @@ const SETTINGS_SCHEMA = [
       {k:"STEADY_SPEED_PX", label:"Steady speed (px)", type:"float"},
       {k:"WARP_EXPAND_PCT", label:"Warp expand %", type:"float"},
       {k:"WARP_CROP_PCT", label:"Warp crop %", type:"float"},
+      {k:"WARP_EDGE_PAD_PCT", label:"Warp edge pad %", type:"float"},
       {k:"DETECT_MAX_FPS", label:"Detect max fps", type:"int"},
+      {k:"TRACK_BOX_BLEND", label:"Track box blend", type:"float"},
+      {k:"REFINE_WARP_EDGE_CROP_PCT", label:"Refine warp edge crop pct", type:"float"},
+      {k:"REFINE_PAD_RATIO", label:"Refine pad ratio", type:"float"},
+      {k:"REFINE_MIN_CONTOUR_FRAC", label:"Refine min contour frac", type:"float"},
+      {k:"REFINE_ASPECT_TOL", label:"Refine aspect tolerance", type:"float"},
+      {k:"REFINE_MAX_DELTA_PX", label:"Refine max delta px", type:"float"},
     ]
   },
 
@@ -1411,11 +1627,11 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
     renderScans(d); // <- this was "renderHistoryItems" before (typo)
   }
   // ---------- State / pills ----------
-  function fetchState() {
-    if (modalOpen) return;
-    fetch("/api/state?ts=" + Date.now())
-      .then(r => r.json())
-      .then(function (s) {
+    function fetchState() {
+      if (modalOpen) return;
+      fetch("/api/state?ts=" + Date.now())
+        .then(r => r.json())
+        .then(function (s) {
         lastState = s;
 
         const scannerPills = [];
@@ -1427,6 +1643,11 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         updatePills(sc, scannerPills);
 
         const p1p = [{ txt: (s.ws_connected ? "WS connected" : "WS offline"), cls: (s.ws_connected ? "ok" : "bad") }];
+        const cph = (typeof s.cards_per_hour === "number") ? Math.max(0, Math.round(s.cards_per_hour)) : null;
+        if (cph !== null) {
+          const cls = cph > 0 ? "info" : "warn";
+          p1p.push({ txt: `Cards/hr ${cph.toLocaleString()}`, cls });
+        }
         if (s.awaiting) p1p.push({ txt: "Most recent scan - Job #" + s.job_id, cls: "info" });
         if (s.last_decision) p1p.push({ txt: s.last_decision, cls: "ok" });
         const stacks = s.stacks || {};
@@ -1435,12 +1656,21 @@ document.getElementById("exportBtn")?.addEventListener("click", () => {
         const heights = stacks.current_height || [];
         [0, 1].forEach((i) => {
           const rc = rem[i];
-          const startTxt = (typeof start[i] === "number") ? ` of ${start[i]}` : "";
-          const hTxt = (typeof heights[i] === "number") ? ` (${heights[i].toFixed(2)}mm)` : "";
-          const txt = (typeof rc === "number")
-            ? `Stack ${i + 1}: ${rc}${startTxt} cards${hTxt}`
-            : `Stack ${i + 1}: —${startTxt} ${hTxt}`.trim();
-          p1p.push({ txt, cls: (typeof rc === "number" ? "ok" : "warn") });
+          const h = heights[i];
+          const hasRem = typeof rc === "number" && Number.isFinite(rc);
+          const hasHeight = typeof h === "number" && Number.isFinite(h);
+          const emptyFromRem = hasRem && rc <= 0;
+          const emptyFromHeight = !hasRem && hasHeight && h <= 0;
+          const empty = emptyFromRem || emptyFromHeight;
+          const unknown = !hasRem && !hasHeight;
+          const startTxt = (typeof start[i] === "number" && Number.isFinite(start[i])) ? ` of ${start[i]}` : "";
+          const detailParts = [];
+          if (hasRem) detailParts.push(`${rc}${startTxt} cards`);
+          if (hasHeight) detailParts.push(`${h.toFixed(2)}mm`);
+          const detail = detailParts.length ? ` (${detailParts.join(" • ")})` : "";
+          const statusTxt = unknown ? "UNKNOWN" : (empty ? "EMPTY" : "ACTIVE");
+          const cls = unknown ? "warn" : (empty ? "bad" : "ok");
+          p1p.push({ txt: `Stack ${i + 1}: ${statusTxt}${detail}`, cls });
         });
         updatePills(p1, p1p);
 
@@ -2680,6 +2910,10 @@ document.getElementById('export-go')?.addEventListener('click', ()=>{
   const qs = new URLSearchParams(historyQueryQS || buildHistoryQuery());
   qs.set('fmt','csv');
   if (fields.length) qs.set('fields', fields.join(','));
+  const cond = (document.getElementById('export-cond')?.value || '').trim();
+  const lang = (document.getElementById('export-lang')?.value || '').trim();
+  if (cond) qs.set('condition', cond);
+  if (lang) qs.set('language', lang);
   if (exportCardSphereMode) qs.set('cardsphere_import','1');
   // NOTE: we export using whatever filters are set; decklist export still forces pass-only
   window.location.href = '/api/scans/export/download?' + qs.toString();
@@ -2745,9 +2979,10 @@ backupImport?.addEventListener('click', runBackupImport);
 
   if (startGo) startGo.addEventListener('click', async (e) => {
     e.stopImmediatePropagation(); e.preventDefault();
-    const n = Math.max(1, parseInt(startCount?.value || "1", 10));
+    const raw = parseInt(startCount?.value || "1", 10);
+    const n = Number.isFinite(raw) ? Math.max(0, raw) : 1;
     const d = await sendMacro('RUN_SORTER_INTERACTIVE', { COUNT: n });
-    if (d?.ok) log('t', 'RUN_SORTER_INTERACTIVE COUNT=' + n);
+    if (d?.ok) log('t', n === 0 ? 'RUN_SORTER_INTERACTIVE COUNT=0 (until stacks empty)' : 'RUN_SORTER_INTERACTIVE COUNT=' + n);
     else log('t', 'Start failed: ' + (d?.error || 'unknown'));
     closeStart();
   }, true);
